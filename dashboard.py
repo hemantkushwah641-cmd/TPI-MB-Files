@@ -16,8 +16,23 @@ from tkinter import filedialog, messagebox, simpledialog, ttk
 from vault import days_left, master_is_set, protect, session_unlock, set_master, unprotect, verify_master
 
 ROOT = Path(__file__).resolve().parent
-if not (ROOT / "tpi_mb_downloader.py").exists() and (ROOT.parent / "tpi_mb_downloader.py").exists():
-    ROOT = ROOT.parent
+
+def _find_root() -> Path:
+    cands = [ROOT, ROOT.parent, Path.cwd(), Path.cwd().parent]
+    try:
+        cands.extend(ROOT.parent.glob("tpi_mb_downloader*"))
+        cands.extend(Path.cwd().glob("tpi_mb_downloader*"))
+    except Exception:
+        pass
+    for p in cands:
+        p = Path(p)
+        if p.is_file():
+            p = p.parent
+        if (p / "tpi_mb_downloader.py").exists():
+            return p
+    return ROOT
+
+ROOT = _find_root()
 os.chdir(ROOT)
 DATA = ROOT / ".tpidata"
 DATA.mkdir(exist_ok=True)
@@ -337,11 +352,13 @@ class App(tk.Tk):
         dlf = ttk.LabelFrame(tab_dl, text="  Download this run  ")
         dlf.pack(fill="x", pady=(8, 8))
         self.dl_excel = tk.BooleanVar(value=True)
-        self.dl_mb = tk.BooleanVar(value=True)
-        self.dl_docs = tk.BooleanVar(value=True)
-        ttk.Checkbutton(dlf, text="1. Session Excel only (tpi_output.xlsx in Session folder)", variable=self.dl_excel).grid(row=0, column=0, columnspan=2, sticky="w", padx=8, pady=3)
-        ttk.Checkbutton(dlf, text="2. Signed MB PDF + Signed MB Excel + Abstract + comments", variable=self.dl_mb).grid(row=1, column=0, columnspan=2, sticky="w", padx=8, pady=3)
-        ttk.Checkbutton(dlf, text="3. Supporting documents (Uploaded Documents)", variable=self.dl_docs).grid(row=2, column=0, sticky="w", padx=8, pady=3)
+        self.dl_mb = tk.BooleanVar(value=False)
+        self.dl_docs = tk.BooleanVar(value=False)
+        ttk.Checkbutton(dlf, text="1. Session Excel only (list, no bill open)", variable=self.dl_excel).grid(row=0, column=0, columnspan=2, sticky="w", padx=8, pady=3)
+        self.dl_loa = tk.BooleanVar(value=True)
+        ttk.Checkbutton(dlf, text="1b. Open each bill → LOA Details + Grand Total (no PDF)", variable=self.dl_loa).grid(row=1, column=0, columnspan=2, sticky="w", padx=8, pady=3)
+        ttk.Checkbutton(dlf, text="2. Signed MB PDF + Signed MB Excel + Abstract + comments", variable=self.dl_mb).grid(row=2, column=0, columnspan=2, sticky="w", padx=8, pady=3)
+        ttk.Checkbutton(dlf, text="3. Supporting documents (Uploaded Documents)", variable=self.dl_docs).grid(row=3, column=0, sticky="w", padx=8, pady=3)
         ttk.Button(dlf, text="Select all", command=self.dl_steps_all).grid(row=0, column=2, padx=8)
         ttk.Button(dlf, text="Clear", command=self.dl_steps_none).grid(row=1, column=2, padx=8)
         runbar = ttk.Frame(tab_dl, padding=(0, 8, 0, 0))
@@ -690,11 +707,13 @@ class App(tk.Tk):
 
     def dl_steps_all(self):
         self.dl_excel.set(True)
+        self.dl_loa.set(True)
         self.dl_mb.set(True)
         self.dl_docs.set(True)
 
     def dl_steps_none(self):
         self.dl_excel.set(False)
+        self.dl_loa.set(False)
         self.dl_mb.set(False)
         self.dl_docs.set(False)
 
@@ -895,7 +914,11 @@ class App(tk.Tk):
             messagebox.showerror("Missing", "tpi_uploader.py was not found.")
             return
         if not upload and not SCRIPT.exists():
-            messagebox.showerror("Missing", "tpi_mb_downloader.py was not found.")
+            messagebox.showerror(
+                "Missing",
+                f"tpi_mb_downloader.py was not found.\n\nLooked in:\n{ROOT}\n\n"
+                "Put dashboard.py, tpi_mb_downloader.py, tpi_uploader.py and activity.py in the SAME folder.",
+            )
             return
         root = self.save_root()
         if not root:
@@ -1000,6 +1023,8 @@ class App(tk.Tk):
                 dls = []
                 if self.dl_excel.get():
                     dls.append("excel")
+                if getattr(self, "dl_loa", None) and self.dl_loa.get():
+                    dls.append("loa")
                 if self.dl_mb.get():
                     dls.append("mb")
                 if self.dl_docs.get():
