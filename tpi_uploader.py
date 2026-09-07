@@ -34,6 +34,7 @@ from tpi_mb_downloader import (
     login,
     open_row,
     save_debug,
+    scrape_grand_total,
     today_stamp,
     win_name,
 )
@@ -700,6 +701,9 @@ def main() -> None:
                     detail = open_row(page, row)
                     fill = b.get("fill") or {}
                     btype = _norm_bill_type(fill.get("bill_type") or fill.get("status"))
+                    grand = scrape_grand_total(detail)
+                    if grand:
+                        log(f"  Grand Total: {grand}")
                     if btype == "return":
                         fill["amount"] = "0.00"
                     log(f"  bill type: {btype}  steps={sorted(steps)}")
@@ -730,6 +734,21 @@ def main() -> None:
                             log(f"  screenshot saved: {dest.name}")
                         except Exception as exc:
                             log(f"  screenshot: {exc}")
+                    try:
+                        from activity import log_event
+                        log_event(
+                            kind="upload",
+                            action="return" if btype == "return" else "forward",
+                            cluster=os.getenv("TPI_CLUSTER") or "",
+                            district=b.get("district") or "",
+                            scheme_id=b.get("scheme_id") or "",
+                            mb_no=b.get("mb_no") or "",
+                            amount=(fill or {}).get("amount") or "",
+                            grand_total=grand,
+                            letter=(fill or {}).get("letter") or "",
+                        )
+                    except Exception as exc:
+                        log(f"  activity: {exc}")
                     if detail != page:
                         try:
                             detail.close()
