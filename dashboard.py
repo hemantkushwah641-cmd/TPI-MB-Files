@@ -324,8 +324,10 @@ class App(tk.Tk):
         self.nb.pack(fill="both", expand=True, pady=(6, 0))
         tab_dl = ttk.Frame(self.nb, padding=10)
         tab_up = ttk.Frame(self.nb, padding=10)
+        tab_sum = ttk.Frame(self.nb, padding=10)
         self.nb.add(tab_dl, text="  1. Download  ")
         self.nb.add(tab_up, text="  2. Upload  ")
+        self.nb.add(tab_sum, text="  3. Summary  ")
 
         ttk.Label(
             tab_dl,
@@ -416,6 +418,56 @@ class App(tk.Tk):
         self.up_tree.configure(yscrollcommand=usb.set)
         self.up_tree.bind("<Button-1>", self._up_click)
 
+        ttk.Label(
+            tab_sum,
+            text="Pending at TPI (last download, not yet forwarded/returned).\n"
+                 "Forward / Return by date — Return amount uses portal Grand Total (TPI amount is 0.00).",
+            style="Hint.TLabel",
+        ).pack(anchor="w")
+        sf = ttk.Frame(tab_sum)
+        sf.pack(fill="x", pady=8)
+        ttk.Label(sf, text="From (YYYY-MM-DD)").pack(side="left")
+        self.sum_from = tk.StringVar(value=datetime.now().strftime("%Y-%m-01"))
+        ttk.Entry(sf, textvariable=self.sum_from, width=12).pack(side="left", padx=6)
+        ttk.Label(sf, text="To").pack(side="left")
+        self.sum_to = tk.StringVar(value=datetime.now().strftime("%Y-%m-%d"))
+        ttk.Entry(sf, textvariable=self.sum_to, width=12).pack(side="left", padx=6)
+        ttk.Button(sf, text="  Refresh  ", style="Accent.TButton", command=self.refresh_summary).pack(side="left", padx=8)
+
+        ttk.Label(tab_sum, text="Pending at our level", font=("Segoe UI", 10, "bold")).pack(anchor="w", pady=(6, 2))
+        pcols = ("cluster", "district", "bills", "grand")
+        self.sum_pending = ttk.Treeview(tab_sum, columns=pcols, show="headings", height=5)
+        self.sum_pending.heading("cluster", text="Cluster")
+        self.sum_pending.heading("district", text="District")
+        self.sum_pending.heading("bills", text="Bills")
+        self.sum_pending.heading("grand", text="Grand Total")
+        self.sum_pending.column("cluster", width=140)
+        self.sum_pending.column("district", width=140)
+        self.sum_pending.column("bills", width=70, anchor="e")
+        self.sum_pending.column("grand", width=120, anchor="e")
+        self.sum_pending.pack(fill="x")
+        self.sum_pending_tot = ttk.Label(tab_sum, text="Pending total: —", font=("Segoe UI", 9, "bold"))
+        self.sum_pending_tot.pack(anchor="e", pady=(2, 8))
+
+        ttk.Label(tab_sum, text="Forwarded / Returned", font=("Segoe UI", 10, "bold")).pack(anchor="w", pady=(4, 2))
+        acols = ("date", "cluster", "district", "fwd", "ret", "fwd_amt", "ret_grand", "bills")
+        self.sum_act = ttk.Treeview(tab_sum, columns=acols, show="headings", height=6)
+        for c, t, w in (
+            ("date", "Date", 90),
+            ("cluster", "Cluster", 110),
+            ("district", "District", 110),
+            ("fwd", "Forward", 70),
+            ("ret", "Return", 70),
+            ("fwd_amt", "Forward amount", 110),
+            ("ret_grand", "Return Grand Total", 130),
+            ("bills", "Total bills", 80),
+        ):
+            self.sum_act.heading(c, text=t)
+            self.sum_act.column(c, width=w, anchor="e" if c not in ("date", "cluster", "district") else "w")
+        self.sum_act.pack(fill="both", expand=True)
+        self.sum_act_tot = ttk.Label(tab_sum, text="Period total: —", font=("Segoe UI", 9, "bold"))
+        self.sum_act_tot.pack(anchor="e", pady=4)
+
         loghead = ttk.Frame(right)
         loghead.pack(fill="x")
         ttk.Label(loghead, text="LOG", font=("Segoe UI", 10, "bold")).pack(side="left")
@@ -445,6 +497,7 @@ class App(tk.Tk):
         self.refresh_tree()
         self.after(200, self.drain_log)
         self.after(400, self.refresh_upload)
+        self.after(600, self.refresh_summary)
         if not self.accounts:
             self.after(400, lambda: self.write(
                 "Add at least one ID. Portal passwords are encrypted with the master password.\n"
@@ -498,6 +551,52 @@ class App(tk.Tk):
         if not sel:
             return None
         return int(sel[0])
+
+    def refresh_summary(self):
+        from activity import action_rows, fmt_money, load_events, pending_rows
+        dfrom = (self.sum_from.get() or "").strip()
+        dto = (self.sum_to.get() or "").strip()
+        events = load_events()
+        for tree in (self.sum_pending, self.sum_act):
+            for i in tree.get_children():
+                tree.delete(i)
+        pending = pending_rows(events, dfrom, dto)
+        pb = 0
+        pg = 0.0
+        for r in pending:
+            pb += r["bills"]
+            pg += r["grand"]
+            self.sum_pending.insert(
+                "",
+                "end",
+                values=(r["cluster"], r["district"], r["bills"], fmt_money(r["grand"])),
+            )
+        self.sum_pending_tot.config(text=f"Pending total: {pb} bills   Grand Total {fmt_money(pg)}")
+        acts = action_rows(events, dfrom, dto)
+        tf = tr = 0
+        fa = rg = 0.0
+        for r in acts:
+            tf += r["forward"]
+            tr += r["returned"]
+            fa += r["fwd_amt"]
+            rg += r["ret_grand"]
+            self.sum_act.insert(
+                "",
+                "end",
+                values=(
+                    r["date"],
+                    r["cluster"],
+                    r["district"],
+                    r["forward"],
+                    r["returned"],
+                    fmt_money(r["fwd_amt"]),
+                    fmt_money(r["ret_grand"]),
+                    r["forward"] + r["returned"],
+                ),
+            )
+        self.sum_act_tot.config(
+            text=f"Period: Forward {tf} ({fmt_money(fa)})   Return {tr} (Grand Total {fmt_money(rg)})   Bills {tf + tr}"
+        )
 
     def reset_batch(self):
         self.batch_var.set("")
@@ -839,6 +938,7 @@ class App(tk.Tk):
                         env["DOWNLOAD_DIR"] = str(save_root)
                     env["TPI_BATCH"] = batch
                     env["TPI_ONLY"] = ";".join(only_keys or [])
+                    env["TPI_CLUSTER"] = name
                     steps = []
                     if self.step_files.get():
                         steps.append("files")
