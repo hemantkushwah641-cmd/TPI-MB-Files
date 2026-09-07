@@ -190,6 +190,27 @@ def save_debug(page, name: str) -> None:
         log(f"Screenshot failed: {exc}")
 
 
+def scrape_grand_total(page) -> str:
+    """Portal 'Grand Total : 3,60,068' — return bills use this (TPI amount is 0.00)."""
+    try:
+        text = page.inner_text("body")
+    except Exception:
+        return ""
+    m = re.search(r"Grand\s*Total\s*:?\s*([\d,]+(?:\.\d+)?)", text, re.I)
+    if m:
+        return m.group(1).replace(",", "")
+    try:
+        loc = page.get_by_text(re.compile(r"Grand\s*Total", re.I))
+        if loc.count():
+            chunk = loc.first.evaluate("e => (e.closest('div,tr,table') || e.parentElement).innerText")
+            m = re.search(r"([\d,]+(?:\.\d+)?)", chunk or "")
+            if m:
+                return m.group(1).replace(",", "")
+    except Exception:
+        pass
+    return ""
+
+
 def bill_type_of(mb_no: str) -> str:
     t = (mb_no or "").upper()
     if re.search(r"\bE\s*&\s*M\b|\bEM\b|ELECTR", t):
@@ -216,6 +237,7 @@ def write_tpi_output(rows: list[dict], path: Path) -> None:
         "TPI Date",
         "Bill Type",
         "Cluster",
+        "Grand Total",
     ]
     ws.append(headers)
     for cell in ws[1]:
@@ -241,6 +263,7 @@ def write_tpi_output(rows: list[dict], path: Path) -> None:
             tpi_date,
             bill_type_of(mb),
             cluster,
+            str(r.get("grand_total") or ""),
         ])
     ws.auto_filter.ref = ws.dimensions
     ws.freeze_panes = "A2"
@@ -1483,6 +1506,8 @@ def download_for_row(page, row: dict, args) -> dict:
         row["error"] = f"DOWNLOAD SIGNED MB PDF nahi dikha url={detail.url}"
         return row
 
+    row["grand_total"] = scrape_grand_total(detail)
+
     if "mb" in steps:
         pdf = click_download(detail, "DOWNLOAD SIGNED MB PDF", folder)
         row["signed_pdf"] = str(pdf) if pdf else ""
@@ -1678,6 +1703,21 @@ def main() -> None:
             cluster = win_name(os.getenv("TPI_CLUSTER") or "id", 30)
             out_name = f"tpi_output_{cluster}_{datetime.now().strftime('%H%M%S')}.xlsx"
             write_tpi_output(done, sess_dir / out_name)
+            try:
+                from activity import log_event
+                cl = (os.getenv("TPI_CLUSTER") or "").strip()
+                for r in done:
+                    log_event(
+                        kind="download",
+                        cluster=cl or r.get("cluster") or "",
+                        district=r.get("district") or r.get("district_folder") or cl,
+                        scheme_id=r.get("scheme_id") or "",
+                        mb_no=r.get("mb_no") or "",
+                        grand_total=r.get("grand_total") or "",
+                        status=r.get("status") or "",
+                    )
+            except Exception as exc:
+                log(f"activity log: {exc}")
             merge_session_master(sess_dir)
             by_dist: dict[str, int] = defaultdict(int)
             for r in done:
