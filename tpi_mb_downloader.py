@@ -238,6 +238,10 @@ def write_tpi_output(rows: list[dict], path: Path) -> None:
         "Bill Type",
         "Cluster",
         "Grand Total",
+        "Unit Name",
+        "LoA Date",
+        "Circle",
+        "Division",
     ]
     ws.append(headers)
     for cell in ws[1]:
@@ -263,7 +267,11 @@ def write_tpi_output(rows: list[dict], path: Path) -> None:
             tpi_date,
             bill_type_of(mb),
             cluster,
-            str(r.get("grand_total") or ""),
+            str(r.get("grand_total") or "").replace(",", ""),
+            str(r.get("unit") or ""),
+            str(r.get("loa_date") or ""),
+            str(r.get("circle") or ""),
+            str(r.get("division") or ""),
         ])
     ws.auto_filter.ref = ws.dimensions
     ws.freeze_panes = "A2"
@@ -1441,17 +1449,25 @@ def read_loa_details(page) -> dict:
             const body = (document.body.innerText || '').replace(/\\r/g, '');
             const lines = body.split('\\n').map(s => s.trim()).filter(s => s.length);
             const grab = (label) => {
-                const i = lines.findIndex(s => s.toLowerCase() === label.toLowerCase());
-                return (i >= 0 && lines[i+1]) ? lines[i+1] : '';
+                const low = label.toLowerCase();
+                for (let i = 0; i < lines.length; i++) {
+                    if (lines[i].toLowerCase() === low) return lines[i+1] || '';
+                    const m = lines[i].match(new RegExp('^' + label.replace(/[.*+?^${}()|[\\]\\\\]/g,'\\\\$&') + '\\s*[:\\-]\\s*(.+)$', 'i'));
+                    if (m) return m[1].trim();
+                }
+                return '';
             };
             return {
-                district: grab('District Name'),
+                district: grab('District Name') || grab('District'),
                 scheme_name: grab('Scheme Name'),
                 scheme_id: grab('Scheme ID'),
-                loa_number: grab('LoA Number'),
-                state: grab('State Name'),
-                unit: grab('Unit Name'),
+                loa_number: grab('LoA Number') || grab('LoA No.'),
+                state: grab('State Name') || grab('State'),
+                unit: grab('Unit Name') || grab('Unit'),
                 loa_date: grab('LoA Date'),
+                circle: grab('Circle Name') || grab('Circle'),
+                division: grab('Division Name') || grab('Division'),
+                block: grab('Block Name') || grab('Block'),
             };
         }"""
     )
@@ -1478,6 +1494,21 @@ def download_for_row(page, row: dict, args) -> dict:
         row["scheme_id"] = loa["scheme_id"]
     if loa.get("state"):
         row["state"] = loa["state"]
+    if loa.get("unit"):
+        row["unit"] = loa["unit"]
+    if loa.get("loa_date"):
+        row["loa_date"] = loa["loa_date"]
+    if loa.get("circle"):
+        row["circle"] = loa["circle"]
+    if loa.get("division"):
+        row["division"] = loa["division"]
+    if loa.get("block"):
+        row["block"] = loa["block"]
+
+    row["grand_total"] = scrape_grand_total(detail)
+    if row.get("grand_total"):
+        row["grand_total"] = str(row["grand_total"]).replace(",", "").replace(" ", "")
+    log(f"  Grand Total: {row.get('grand_total') or '-'}")
 
     day = today_stamp()
     dist = district_folder(row.get("district") or os.getenv("TPI_CLUSTER") or "Unknown")
@@ -1502,11 +1533,15 @@ def download_for_row(page, row: dict, args) -> dict:
         )
     except Exception:
         save_debug(detail, f"no_dl_btn_{row.get('scheme_id')}")
-        row["status"] = "no_download_button"
-        row["error"] = f"DOWNLOAD SIGNED MB PDF nahi dikha url={detail.url}"
-        return row
+        if "mb" in steps or "docs" in steps:
+            row["status"] = "no_download_button"
+            row["error"] = f"DOWNLOAD SIGNED MB PDF nahi dikha url={detail.url}"
+            return row
 
-    row["grand_total"] = scrape_grand_total(detail)
+    if not row.get("grand_total"):
+        row["grand_total"] = scrape_grand_total(detail)
+        if row.get("grand_total"):
+            row["grand_total"] = str(row["grand_total"]).replace(",", "")
 
     if "mb" in steps:
         pdf = click_download(detail, "DOWNLOAD SIGNED MB PDF", folder)
@@ -1524,8 +1559,11 @@ def download_for_row(page, row: dict, args) -> dict:
         row["uploaded_docs"] = " | ".join(uploads)
     else:
         row["uploaded_docs"] = ""
-    ok = bool(row.get("signed_pdf") or row.get("uploaded_docs") or row.get("comments_file"))
-    row["status"] = "downloaded" if ok else "download_failed"
+    ok = bool(row.get("signed_pdf") or row.get("uploaded_docs") or row.get("comments_file") or row.get("grand_total") or row.get("district"))
+    if "mb" not in steps and "docs" not in steps:
+        row["status"] = "scraped"
+    else:
+        row["status"] = "downloaded" if ok else "download_failed"
     row["bill_key"] = bill_key(row)
     if detail != page:
         try:
@@ -1656,7 +1694,7 @@ def main() -> None:
             log(f"Download steps: {sorted(dl_steps)}")
 
             done = list(skipped)
-            want_files = "mb" in dl_steps or "docs" in dl_steps
+            want_files = "mb" in dl_steps or "docs" in dl_steps or "loa" in dl_steps
             if want_files:
                 for idx, row in enumerate(queue, 1):
                     log(f"[{idx}/{len(queue)}] {row.get('date')} | {row.get('scheme')} | {row.get('scheme_id')} | {row.get('mb_no')}")
@@ -1696,7 +1734,7 @@ def main() -> None:
 
             day_dir = DOWNLOAD_DIR / today_stamp()
             day_dir.mkdir(parents=True, exist_ok=True)
-            n_ok = sum(1 for r in done if r.get("status") == "downloaded")
+            n_ok = sum(1 for r in done if r.get("status") in ("downloaded", "scraped", "listed"))
             n_skip = sum(1 for r in done if r.get("status") == "skipped_already_downloaded")
             sess_dir = day_dir / win_name(args.session, 40)
             sess_dir.mkdir(parents=True, exist_ok=True)
