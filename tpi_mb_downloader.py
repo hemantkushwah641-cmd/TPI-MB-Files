@@ -260,6 +260,7 @@ def write_tpi_output(rows: list[dict], path: Path) -> None:
         "ID TYPE",
         "District Name",
         "TPI Date",
+        "TPI Officer",
         "Bill Type",
         "Cluster",
         "Grand Total",
@@ -272,12 +273,12 @@ def write_tpi_output(rows: list[dict], path: Path) -> None:
     for cell in ws[1]:
         cell.font = Font(bold=True)
     id_type = (os.getenv("TPI_ID_TYPE") or "TL").strip() or "TL"
-    tpi_date = datetime.now().strftime("%Y-%m-%d")
     for r in rows:
         mb = str(r.get("mb_no") or "")
         sid = str(r.get("scheme_id") or "")
         dist = str(r.get("district") or r.get("district_folder") or "").replace(" District", "").strip()
         cluster = str(r.get("cluster") or os.getenv("TPI_CLUSTER") or dist)
+        tpi_when = str(r.get("tpi_level_date") or "")
         ws.append([
             str(r.get("list_ref") or r.get("loa_number") or ""),
             mb,
@@ -289,7 +290,8 @@ def write_tpi_output(rows: list[dict], path: Path) -> None:
             str(r.get("state") or "Uttar Pradesh"),
             str(r.get("id_type") or id_type),
             dist or cluster,
-            tpi_date,
+            tpi_when,
+            str(r.get("tpi_officer") or ""),
             bill_type_of(mb),
             cluster,
             str(r.get("grand_total") or "").replace(",", ""),
@@ -1454,6 +1456,78 @@ def save_comments(page, folder: Path) -> str:
     return str(path)
 
 
+def scrape_comment_blocks(page) -> list[dict]:
+    try:
+        hdr = page.get_by_text(re.compile(r"^Comment\(s\)$", re.I))
+        if hdr.count():
+            hdr.first.click(timeout=4000)
+        else:
+            page.get_by_text("Comment(s)", exact=False).first.click(timeout=4000)
+        page.wait_for_timeout(800)
+    except Exception:
+        pass
+    data = page.evaluate(
+        """() => {
+            const hdr = [...document.querySelectorAll('a,button,div,h2,h3,h4,span,p')].find(e => {
+                const t = (e.innerText || '').replace(/\\s+/g,' ').trim();
+                return /^comment\\(s\\)$/i.test(t);
+            });
+            if (hdr) {
+                hdr.click();
+                const row = hdr.closest('div') || hdr.parentElement;
+                if (row) {
+                    const tog = row.querySelector('[class*="plus"], [class*="chevron"], [class*="arrow"], i, svg');
+                    if (tog) tog.click();
+                }
+            }
+            const dateRe = /\\(\\s*\\d{1,2}\\s+[A-Za-z]{3,9},?\\s+\\d{4}\\s+\\d{1,2}:\\d{2}\\s*(AM|PM)\\s*\\)/i;
+            const blocks = [];
+            const seen = new Set();
+            const els = [...document.querySelectorAll('div')];
+            for (const el of els) {
+                const raw = (el.innerText || '').trim();
+                if (!dateRe.test(raw)) continue;
+                if (raw.length < 24 || raw.length > 900) continue;
+                const childDates = [...el.querySelectorAll('div')].filter(d => dateRe.test(d.innerText || '')).length;
+                if (childDates > 2) continue;
+                const norm = raw.replace(/[ \\t]+/g, ' ').replace(/\\n{3,}/g, '\\n\\n').trim();
+                const key = norm.slice(0, 220);
+                if (seen.has(key)) continue;
+                seen.add(key);
+                const m = raw.match(dateRe);
+                const when = m ? m[0].replace(/[()]/g, '').trim() : '';
+                const before = m ? raw.slice(0, m.index).replace(/\\s+/g, ' ').trim() : '';
+                const after = m ? raw.slice(m.index + m[0].length).replace(/\\s+/g, ' ').trim() : '';
+                let author = before, role = '';
+                const rm = before.match(/^(.+?)\\s*\\((.+)\\)\\s*$/);
+                if (rm) { author = rm[1].trim(); role = rm[2].trim(); }
+                blocks.push({ author, role, when, text: after, raw: norm });
+            }
+            return blocks;
+        }"""
+    )
+    return data if isinstance(data, list) else []
+
+
+def scrape_tpi_level_date(page) -> dict:
+    """Last comment with role Third Party Inspection (TPI) = when bill reached TPI."""
+    blocks = scrape_comment_blocks(page)
+    tpi = [
+        b for b in blocks
+        if re.search(r"third\s*party\s*inspection|\bTPI\b", str(b.get("role") or ""), re.I)
+    ]
+    pick = tpi[-1] if tpi else (blocks[-1] if blocks else None)
+    if not pick:
+        log("  TPI level date: no comment found")
+        return {}
+    log(f"  TPI level: {pick.get('author')} ({pick.get('role')}) {pick.get('when')}")
+    return {
+        "tpi_level_date": pick.get("when") or "",
+        "tpi_officer": pick.get("author") or "",
+        "tpi_role": pick.get("role") or "",
+    }
+
+
 def read_loa_details(page) -> dict:
     """LoA Details accordion se District, Scheme, LoA Number."""
     try:
@@ -1535,6 +1609,9 @@ def download_for_row(page, row: dict, args) -> dict:
     if row.get("grand_total"):
         row["grand_total"] = str(row["grand_total"]).replace(",", "").replace(" ", "")
     log(f"  Grand Total: {row.get('grand_total') or '-'}")
+    tpi = scrape_tpi_level_date(detail)
+    row["tpi_level_date"] = tpi.get("tpi_level_date") or ""
+    row["tpi_officer"] = tpi.get("tpi_officer") or ""
 
     day = today_stamp()
     dist = district_folder(row.get("district") or os.getenv("TPI_CLUSTER") or "Unknown")
