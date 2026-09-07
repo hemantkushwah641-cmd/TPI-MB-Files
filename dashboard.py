@@ -1033,6 +1033,7 @@ class App(tk.Tk):
                     self.log_q.put("ERROR: tick at least one Download option\n")
                     return
                 env["TPI_DL_STEPS"] = ",".join(dls)
+                self.log_q.put(f"Steps: {env['TPI_DL_STEPS']}\n")
                 cmd = [str(PY), str(SCRIPT), "--headed", "--with-abstract", "--session", session]
                 proc = subprocess.Popen(
                     cmd,
