@@ -191,24 +191,49 @@ def save_debug(page, name: str) -> None:
 
 
 def scrape_grand_total(page) -> str:
-    """Portal 'Grand Total : 3,60,068' — return bills use this (TPI amount is 0.00)."""
+    """Portal 'Grand Total : 11,81,218' — digits only, no commas."""
     try:
-        text = page.inner_text("body")
-    except Exception:
-        return ""
-    m = re.search(r"Grand\s*Total\s*:?\s*([\d,]+(?:\.\d+)?)", text, re.I)
-    if m:
-        return m.group(1).replace(",", "")
-    try:
-        loc = page.get_by_text(re.compile(r"Grand\s*Total", re.I))
-        if loc.count():
-            chunk = loc.first.evaluate("e => (e.closest('div,tr,table') || e.parentElement).innerText")
-            m = re.search(r"([\d,]+(?:\.\d+)?)", chunk or "")
-            if m:
-                return m.group(1).replace(",", "")
+        page.get_by_text(re.compile(r"Grand\s*Total", re.I)).first.scroll_into_view_if_needed(timeout=5000)
+        page.wait_for_timeout(400)
     except Exception:
         pass
-    return ""
+    val = ""
+    try:
+        val = page.evaluate(
+            """() => {
+                const norm = (s) => (s || '').replace(/\\u00a0/g, ' ').replace(/\\s+/g, ' ').trim();
+                const pick = (s) => {
+                    const nums = (s || '').match(/\\d{1,3}(?:,\\d{2,3})+(?:\\.\\d+)?|\\d{4,}(?:\\.\\d+)?/g) || [];
+                    return nums.length ? nums[nums.length - 1] : '';
+                };
+                const nodes = [...document.querySelectorAll('tr, td, th, div, span, p, h4, h5, label')];
+                for (const n of nodes) {
+                    const t = norm(n.innerText);
+                    if (!/grand\\s*total/i.test(t)) continue;
+                    if (t.length > 200) continue;
+                    let got = pick(t);
+                    if (got) return got;
+                    const row = n.closest('tr') || n.parentElement;
+                    got = pick(row && row.innerText);
+                    if (got) return got;
+                    const next = n.nextElementSibling;
+                    got = pick(next && next.innerText);
+                    if (got) return got;
+                }
+                return pick(document.body.innerText);
+            }"""
+        ) or ""
+    except Exception:
+        val = ""
+    if not val:
+        try:
+            text = page.inner_text("body")
+            m = re.search(r"Grand\s*Total\s*:?\s*([\d,]+(?:\.\d+)?)", text, re.I)
+            if m:
+                val = m.group(1)
+        except Exception:
+            pass
+    return re.sub(r"[^\d.]", "", str(val or ""))
 
 
 def bill_type_of(mb_no: str) -> str:
@@ -1483,6 +1508,7 @@ def download_for_row(page, row: dict, args) -> dict:
             row[k] = v
     log(f"  detail URL: {detail.url}")
 
+    log(f"  scraping LoA Details + Grand Total...")
     loa = read_loa_details(detail)
     if loa.get("district"):
         row["district"] = loa["district"]
@@ -1644,6 +1670,10 @@ def main() -> None:
                             "status": "downloaded",
                         }
             save_index(index)
+            dl_steps = {s.strip() for s in (os.getenv("TPI_DL_STEPS") or "excel,mb,docs").split(",") if s.strip()}
+            log(f"Download steps: {sorted(dl_steps)}")
+            need_open = "mb" in dl_steps or "docs" in dl_steps or "loa" in dl_steps
+
             groups: dict[tuple, list] = defaultdict(list)
             key_groups: dict[str, list] = defaultdict(list)
             for r in selected:
@@ -1668,14 +1698,18 @@ def main() -> None:
             skipped = []
             for r in selected:
                 rec = None if args.force else already_downloaded(r, index)
-                if rec:
+                # 1b LOA + Grand Total must open the bill even if Excel was saved earlier
+                if need_open and "loa" in dl_steps and not (rec and rec.get("grand_total")):
+                    queue.append(r)
+                    continue
+                if rec and not need_open:
                     r["status"] = "skipped_already_downloaded"
                     r["skip_reason"] = f"already on {rec.get('downloaded_on', '')}"
                     r["signed_pdf"] = rec.get("signed_pdf", "")
                     r["abstract"] = rec.get("abstract", "")
                     skipped.append(r)
                     log(f"  SKIP {r.get('scheme_id')} {r.get('mb_no')} — index")
-                elif not args.force and already_on_disk(r, on_disk):
+                elif not args.force and already_on_disk(r, on_disk) and "loa" not in dl_steps and "mb" not in dl_steps:
                     r["status"] = "skipped_already_downloaded"
                     r["skip_reason"] = "folder pehle se Kautilya E-MB mein"
                     skipped.append(r)
@@ -1690,11 +1724,9 @@ def main() -> None:
             elif args.session.isdigit():
                 args.session = f"Session {args.session}"
             log(f"Is run: {DOWNLOAD_DIR} / Date / {args.session} / District / files")
-            dl_steps = {s.strip() for s in (os.getenv("TPI_DL_STEPS") or "excel,mb,docs").split(",") if s.strip()}
-            log(f"Download steps: {sorted(dl_steps)}")
 
             done = list(skipped)
-            want_files = "mb" in dl_steps or "docs" in dl_steps or "loa" in dl_steps
+            want_files = need_open
             if want_files:
                 for idx, row in enumerate(queue, 1):
                     log(f"[{idx}/{len(queue)}] {row.get('date')} | {row.get('scheme')} | {row.get('scheme_id')} | {row.get('mb_no')}")
@@ -1703,7 +1735,7 @@ def main() -> None:
                             go_to_tpi_list(page)
                         updated = download_for_row(page, row, args)
                         done.append(updated)
-                        if updated.get("status") == "downloaded":
+                        if updated.get("status") in ("downloaded", "scraped"):
                             index[bill_key(updated)] = {
                                 "scheme_id": updated.get("scheme_id"),
                                 "mb_no": updated.get("mb_no"),
@@ -1714,8 +1746,10 @@ def main() -> None:
                                 "signed_pdf": updated.get("signed_pdf"),
                                 "abstract": updated.get("abstract"),
                                 "uploaded_docs": updated.get("uploaded_docs"),
+                                "grand_total": updated.get("grand_total"),
+                                "district": updated.get("district"),
                                 "downloaded_on": datetime.now().isoformat(timespec="seconds"),
-                                "status": "downloaded",
+                                "status": updated.get("status"),
                             }
                             save_index(index)
                         back_to_tpi_list(page)
