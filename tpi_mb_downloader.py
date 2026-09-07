@@ -215,6 +215,7 @@ def write_tpi_output(rows: list[dict], path: Path) -> None:
         "District Name",
         "TPI Date",
         "Bill Type",
+        "Cluster",
     ]
     ws.append(headers)
     for cell in ws[1]:
@@ -225,6 +226,7 @@ def write_tpi_output(rows: list[dict], path: Path) -> None:
         mb = str(r.get("mb_no") or "")
         sid = str(r.get("scheme_id") or "")
         dist = str(r.get("district") or r.get("district_folder") or "").replace(" District", "").strip()
+        cluster = str(r.get("cluster") or os.getenv("TPI_CLUSTER") or dist)
         ws.append([
             str(r.get("list_ref") or r.get("loa_number") or ""),
             mb,
@@ -235,9 +237,10 @@ def write_tpi_output(rows: list[dict], path: Path) -> None:
             str(r.get("type") or "-"),
             str(r.get("state") or "Uttar Pradesh"),
             str(r.get("id_type") or id_type),
-            dist,
+            dist or cluster,
             tpi_date,
             bill_type_of(mb),
+            cluster,
         ])
     ws.auto_filter.ref = ws.dimensions
     ws.freeze_panes = "A2"
@@ -247,6 +250,61 @@ def write_tpi_output(rows: list[dict], path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     wb.save(path)
     log(f"TPI output Excel: {path}")
+
+
+def merge_session_master(sess_dir: Path) -> Path | None:
+    """Combine every tpi_output_*.xlsx in this session into tpi_output_MASTER.xlsx."""
+    sess_dir = Path(sess_dir)
+    if not sess_dir.exists():
+        return None
+    files = sorted(
+        p for p in sess_dir.glob("tpi_output*.xlsx")
+        if p.is_file() and "master" not in p.name.lower()
+    )
+    if not files:
+        return None
+    from openpyxl import load_workbook
+    headers = None
+    rows_out = []
+    seen = set()
+    for path in files:
+        try:
+            wb = load_workbook(path, data_only=True, read_only=True)
+            ws = wb.active
+            data = list(ws.iter_rows(values_only=True))
+            wb.close()
+        except Exception as exc:
+            log(f"  merge skip {path.name}: {exc}")
+            continue
+        if not data:
+            continue
+        if headers is None:
+            headers = [str(c or "") for c in data[0]]
+        for raw in data[1:]:
+            key = (str(raw[5] if len(raw) > 5 else ""), str(raw[1] if len(raw) > 1 else ""))
+            if key in seen:
+                continue
+            seen.add(key)
+            rows_out.append(list(raw))
+    if not headers:
+        return None
+    dest = sess_dir / "tpi_output_MASTER.xlsx"
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "TPI Data"
+    ws.append(headers)
+    for cell in ws[1]:
+        cell.font = Font(bold=True)
+    for raw in rows_out:
+        ws.append(list(raw))
+    ws.auto_filter.ref = ws.dimensions
+    ws.freeze_panes = "A2"
+    for col in ws.columns:
+        width = min(max(len(str(c.value or "")) for c in col) + 2, 55)
+        ws.column_dimensions[col[0].column_letter].width = width
+    wb.save(dest)
+    log(f"MASTER Excel ({len(rows_out)} rows from {len(files)} file(s)): {dest}")
+    return dest
 
 
 def write_excel(rows: list[dict], path: Path) -> None:
@@ -1399,7 +1457,7 @@ def download_for_row(page, row: dict, args) -> dict:
         row["state"] = loa["state"]
 
     day = today_stamp()
-    dist = district_folder(row.get("district") or "Unknown")
+    dist = district_folder(row.get("district") or os.getenv("TPI_CLUSTER") or "Unknown")
     session = (getattr(args, "session", None) or os.getenv("TPI_SESSION") or "").strip()
     if not session:
         session = f"Session {next_session_no(DOWNLOAD_DIR, day)}"
@@ -1473,6 +1531,8 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    if not (args.session or "").strip():
+        args.session = (os.getenv("TPI_SESSION") or "").strip()
     ensure_dirs()
     show_browser = args.headed or not args.list_only
 
@@ -1489,7 +1549,12 @@ def main() -> None:
                 login(page)
             go_to_tpi_list(page)
             rows = scrape_all_pages(page, max_pages=args.max_pages)
-            log(f"Total listed: {len(rows)}")
+            cluster = (os.getenv("TPI_CLUSTER") or "").strip()
+            for r in rows:
+                r["cluster"] = cluster
+                if not (r.get("district") or "").strip() and cluster:
+                    r["district"] = cluster
+            log(f"Total listed: {len(rows)}  cluster={cluster or '-'}")
             write_excel(rows, DOWNLOAD_DIR / "tpi_bill_list.xlsx")
 
             if args.list_only:
@@ -1610,8 +1675,10 @@ def main() -> None:
             n_skip = sum(1 for r in done if r.get("status") == "skipped_already_downloaded")
             sess_dir = day_dir / win_name(args.session, 40)
             sess_dir.mkdir(parents=True, exist_ok=True)
-            out_name = f"tpi_output_{datetime.now().strftime('%H%M%S')}.xlsx"
+            cluster = win_name(os.getenv("TPI_CLUSTER") or "id", 30)
+            out_name = f"tpi_output_{cluster}_{datetime.now().strftime('%H%M%S')}.xlsx"
             write_tpi_output(done, sess_dir / out_name)
+            merge_session_master(sess_dir)
             by_dist: dict[str, int] = defaultdict(int)
             for r in done:
                 if r.get("status") == "downloaded":
