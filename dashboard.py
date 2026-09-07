@@ -885,7 +885,7 @@ class App(tk.Tk):
                 if nums:
                     n = max(nums) + 1
             session = f"Session {n}"
-            self.log_q.put(f"Save: {save_root} \\ {day} \\ {session} \\ District \\ bill\n")
+            self.log_q.put(f"Save: {save_root} \\ {day} \\ {session} \\ Cluster \\ bill  (all IDs share this session)\n")
             for i, acc in enumerate(rows, 1):
                 name = acc.get("name") or acc.get("user")
                 self.log_q.put(f"\n======== [{i}/{len(rows)}] {name}  |  CAPTCHA + SIGN IN ========\n")
@@ -894,6 +894,7 @@ class App(tk.Tk):
                 env["PORTAL_PASS"] = acc.get("pass") or ""
                 env["DOWNLOAD_DIR"] = str(save_root)
                 env["TPI_SESSION"] = session
+                env["TPI_CLUSTER"] = name
                 env["ACTION_DELAY"] = "0.4"
                 env["PYTHONUNBUFFERED"] = "1"
                 dls = []
@@ -907,7 +908,7 @@ class App(tk.Tk):
                     self.log_q.put("ERROR: tick at least one Download option\n")
                     return
                 env["TPI_DL_STEPS"] = ",".join(dls)
-                cmd = [str(PY), str(SCRIPT), "--headed", "--with-abstract"]
+                cmd = [str(PY), str(SCRIPT), "--headed", "--with-abstract", "--session", session]
                 proc = subprocess.Popen(
                     cmd,
                     cwd=str(ROOT),
