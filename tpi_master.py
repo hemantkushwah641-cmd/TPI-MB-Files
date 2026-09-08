@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import re
 from datetime import datetime
 from pathlib import Path
 
@@ -29,6 +30,7 @@ HEADERS = [
     "DL Docs",
     "Last session",
     "Last updated",
+    "Folder link",
 ]
 
 FLAG_MAP = {
@@ -62,6 +64,13 @@ def track_key(row: dict) -> str:
     loa = _norm(row.get("loa_number") or row.get("list_ref") or row.get("LoA No."))
     tpi = _norm(row.get("tpi_level_date") or row.get("TPI Received Date"))
     return f"{sid}|{mb}|{loa}|{tpi}"
+
+
+def snapshot_name(session: str = "") -> str:
+    sess = (session or os.getenv("TPI_SESSION") or "Session").strip() or "Session"
+    sess = re.sub(r'[<>:"/\\|?*]', "-", sess)
+    stamp = datetime.now().strftime("%Y-%m-%d %H%M")
+    return f"tpi_master_{sess}_{stamp}.xlsx"
 
 
 def _row_from_excel(headers: list, raw: tuple) -> dict:
@@ -102,14 +111,32 @@ def save_master(rows: list[dict], path: Path | None = None) -> Path:
     ws.append(HEADERS)
     for cell in ws[1]:
         cell.font = Font(bold=True)
+    link_i = HEADERS.index("Folder link") + 1
     for r in rows:
         ws.append([r.get(h, "") for h in HEADERS])
+        folder = str(r.get("Folder link") or "").strip()
+        if folder and folder.lower() not in ("open folder",):
+            cell = ws.cell(ws.max_row, link_i)
+            href = folder
+            if not href.lower().startswith(("http://", "https://", "file:")):
+                try:
+                    href = Path(folder).as_uri()
+                except Exception:
+                    href = folder
+            cell.value = "Open folder"
+            cell.hyperlink = href
+            cell.font = Font(color="0563C1", underline="single")
     ws.auto_filter.ref = ws.dimensions
     ws.freeze_panes = "A2"
     for col in ws.columns:
         width = min(max(len(str(c.value or "")) for c in col) + 2, 50)
         ws.column_dimensions[col[0].column_letter].width = width
     wb.save(path)
+    try:
+        if path.name.lower() == "tpi_master.xlsx":
+            wb.save(path.with_name(snapshot_name()))
+    except Exception:
+        pass
     return path
 
 
@@ -136,8 +163,6 @@ def find_record(master: list[dict], row: dict) -> dict | None:
     if exact:
         return exact[0]
     if len(loose) == 1:
-        return loose[0]
-    if not tpi and not loa and len(loose) == 1:
         return loose[0]
     return None
 
@@ -177,6 +202,7 @@ def from_portal_row(row: dict, session: str = "") -> dict:
         "DL Docs": "",
         "Last session": session,
         "Last updated": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        "Folder link": str(row.get("save_folder") or ""),
     }
 
 
@@ -207,11 +233,43 @@ def apply_flags(rec: dict, row: dict, done_steps: set[str], session: str) -> dic
 def upsert_rows(master: list[dict], rows: list[dict], done_steps: set[str], session: str) -> list[dict]:
     for row in rows:
         rec = find_record(master, row)
-        payload = from_portal_row(row, session)
         if rec is None:
-            rec = payload
+            rec = from_portal_row(row, session)
             rec = apply_flags(rec, row, done_steps, session)
             master.append(rec)
         else:
             apply_flags(rec, row, done_steps, session)
     return master
+
+
+def sync_gsheet(xlsx_path: Path, sheet_url: str) -> str:
+    """Optional Google Sheet. Needs gspread + google_service_account.json next to the app."""
+    url = (sheet_url or os.getenv("TPI_GSHEET") or "").strip()
+    if not url:
+        return ""
+    cred = Path(__file__).resolve().parent / "google_service_account.json"
+    try:
+        import gspread
+        from google.oauth2.service_account import Credentials
+    except Exception:
+        return "Google Sheets skipped (install gspread + google-auth, add google_service_account.json)"
+    if not cred.exists():
+        return f"Google Sheets skipped — put service account JSON at {cred.name}"
+    scopes = [
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/drive",
+    ]
+    creds = Credentials.from_service_account_file(str(cred), scopes=scopes)
+    gc = gspread.authorize(creds)
+    sh = gc.open_by_url(url) if "http" in url else gc.open_by_key(url)
+    try:
+        ws = sh.worksheet("Master")
+    except Exception:
+        ws = sh.add_worksheet("Master", rows=2000, cols=24)
+    wb = load_workbook(xlsx_path, data_only=True, read_only=True)
+    data = [[c if c is not None else "" for c in row] for row in wb.active.iter_rows(values_only=True)]
+    wb.close()
+    ws.clear()
+    if data:
+        ws.update("A1", data)
+    return f"Google Sheet updated: {sh.url}"
