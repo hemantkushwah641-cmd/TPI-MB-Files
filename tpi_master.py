@@ -43,6 +43,86 @@ FLAG_MAP = {
     "excel": "DL List",
 }
 
+EMB_HEADERS = [
+    "LOA No",
+    "MB No",
+    "MB Date",
+    "Contractor Name",
+    "Scheme Name",
+    "Scheme ID",
+    "Expenditure Type",
+    "State",
+    "Folder Link",
+]
+EMB_WIDTHS = {
+    "A": 42.57,
+    "B": 27.71,
+    "C": 16.85,
+    "D": 21.85,
+    "E": 28.42,
+    "F": 16.57,
+    "G": 17.28,
+    "H": 8.85,
+    "I": 18.0,
+}
+
+
+def _g(row: dict, *keys) -> str:
+    for k in keys:
+        v = row.get(k)
+        if v not in (None, ""):
+            return str(v).strip()
+    return ""
+
+
+def emb_values(row: dict) -> tuple:
+    loa = _g(row, "LOA No", "LoA No", "LoA No.", "loa_number", "list_ref")
+    mb = _g(row, "MB No", "MB No.", "mb_no")
+    date = _g(row, "MB Date", "Measurement Date", "date", "measurement_date")
+    contractor = _g(row, "Contractor Name", "contractor")
+    scheme = _g(row, "Scheme Name", "scheme")
+    sid = _g(row, "Scheme ID", "scheme_id")
+    exp = _g(row, "Expenditure Type", "type") or "-"
+    state = _g(row, "State", "state") or "Uttar Pradesh"
+    folder = _g(row, "Folder Link", "Folder link", "save_folder")
+    href = kautilya_data_url(folder) if folder else ""
+    if href and not href.startswith("https://"):
+        href = ""
+    return loa, mb, date, contractor, scheme, sid, exp, state, href
+
+
+def fill_emb_sheet(ws, rows: list[dict]) -> None:
+    """Exact EMB_Template columns: LOA No … Folder Link."""
+    ws.title = "EMB"
+    if ws.max_row >= 1:
+        ws.delete_rows(1, ws.max_row)
+    ws.append(list(EMB_HEADERS))
+    for cell in ws[1]:
+        cell.font = Font(bold=True)
+    for row in rows:
+        vals = list(emb_values(row))
+        href = vals[-1]
+        vals[-1] = ""
+        ws.append(vals)
+        if href.startswith("https://"):
+            cell = ws.cell(ws.max_row, 9)
+            cell.value = "Kautilya Data"
+            cell.hyperlink = href
+            cell.font = Font(color="0563C1", underline="single")
+    ws.auto_filter.ref = ws.dimensions
+    ws.freeze_panes = "A2"
+    for col, w in EMB_WIDTHS.items():
+        ws.column_dimensions[col].width = w
+
+
+def save_emb_workbook(rows: list[dict], path: Path) -> Path:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    wb = Workbook()
+    fill_emb_sheet(wb.active, rows)
+    wb.save(path)
+    return path
+
 
 def master_path() -> Path:
     p = (os.getenv("TPI_MASTER") or "").strip()
@@ -238,10 +318,13 @@ def save_master(rows: list[dict], path: Path | None = None) -> Path:
     for col in ws.columns:
         width = min(max(len(str(c.value or "")) for c in col) + 2, 50)
         ws.column_dimensions[col[0].column_letter].width = width
+    emb = wb.create_sheet("EMB")
+    fill_emb_sheet(emb, rows)
     wb.save(path)
     try:
         if path.name.lower() == "tpi_master.xlsx":
             wb.save(path.with_name(snapshot_name()))
+            save_emb_workbook(rows, path.with_name("EMB_Template.xlsx"))
     except Exception:
         pass
     if n_miss:
