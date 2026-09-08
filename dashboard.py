@@ -102,6 +102,8 @@ def save_accounts(rows: list[dict]) -> None:
             "user": a.get("user") or "",
             "enabled": bool(a.get("enabled", True)),
             "last_run": a.get("last_run") or "",
+            "last_session": a.get("last_session") or "",
+            "last_update": a.get("last_update") or "",
             "pass_enc": a.get("pass_enc") or "",
         }
         pw = a.get("pass") or ""
@@ -312,16 +314,20 @@ class App(tk.Tk):
 
         mid = ttk.Frame(left)
         mid.pack(fill="x")
-        cols = ("on", "name", "user", "last")
+        cols = ("on", "name", "user", "last", "sess", "upd")
         self.tree = ttk.Treeview(mid, columns=cols, show="headings", height=3, selectmode="browse")
         self.tree.heading("on", text="On")
         self.tree.heading("name", text="Name")
         self.tree.heading("user", text="Login ID")
         self.tree.heading("last", text="Last run")
-        self.tree.column("on", width=48, anchor="center")
-        self.tree.column("name", width=140)
-        self.tree.column("user", width=180)
-        self.tree.column("last", width=130)
+        self.tree.heading("sess", text="Last session")
+        self.tree.heading("upd", text="Last update")
+        self.tree.column("on", width=40, anchor="center")
+        self.tree.column("name", width=120)
+        self.tree.column("user", width=160)
+        self.tree.column("last", width=110)
+        self.tree.column("sess", width=90)
+        self.tree.column("upd", width=110)
         self.tree.pack(side="left", fill="x", expand=True)
         sb = ttk.Scrollbar(mid, orient="vertical", command=self.tree.yview)
         sb.pack(side="right", fill="y")
@@ -385,6 +391,17 @@ class App(tk.Tk):
         self.btn_one.pack(side="left", padx=8)
         self.status = ttk.Label(runbar, text="Ready", font=("Segoe UI", 9, "bold"))
         self.status.pack(side="right")
+        progf = ttk.Frame(tab_dl)
+        progf.pack(fill="x", pady=(6, 0))
+        self.prog_lbl = ttk.Label(progf, text="0 / 0  bills", style="Hint.TLabel")
+        self.prog_lbl.pack(anchor="w")
+        self.prog = ttk.Progressbar(progf, mode="determinate", maximum=100)
+        self.prog.pack(fill="x", pady=(2, 0))
+        gf = ttk.Frame(tab_dl)
+        gf.pack(fill="x", pady=(6, 0))
+        ttk.Label(gf, text="Google Sheet URL (optional)").pack(anchor="w")
+        self.gsheet_var = tk.StringVar(value=load_settings().get("gsheet_url") or "")
+        ttk.Entry(gf, textvariable=self.gsheet_var).pack(fill="x")
 
         ttk.Label(
             tab_up,
@@ -576,6 +593,8 @@ class App(tk.Tk):
                     a.get("name") or "",
                     a.get("user") or "",
                     a.get("last_run") or "-",
+                    a.get("last_session") or "-",
+                    a.get("last_update") or "-",
                 ),
             )
 
@@ -909,6 +928,16 @@ class App(tk.Tk):
     def write(self, msg: str):
         tag = ""
         low = msg.lower()
+        m = re.search(r"PROGRESS\s+(\d+)/(\d+)", msg)
+        if m:
+            cur, tot = int(m.group(1)), max(int(m.group(2)), 1)
+            try:
+                self.prog["maximum"] = tot
+                self.prog["value"] = cur
+                self.prog_lbl.config(text=f"{cur} (Download in progress) / {tot} (Total bills)")
+                self.status.config(text=f"{cur}/{tot}")
+            except Exception:
+                pass
         if "error" in low or "fail" in low or "scan failed" in low:
             tag = "err"
         elif "ok" in low or "success" in low or "uploaded" in low or "finished" in low:
@@ -1055,8 +1084,9 @@ class App(tk.Tk):
                     mpath = str(Path(save_root) / "tpi_master.xlsx")
                     self.master_var.set(mpath)
                 env["TPI_MASTER"] = mpath
-                env["ACTION_DELAY"] = "0.4"
+                env["ACTION_DELAY"] = "0.15"
                 env["PYTHONUNBUFFERED"] = "1"
+                env["TPI_GSHEET"] = self.gsheet_var.get().strip()
                 dls = []
                 if self.dl_excel.get():
                     dls.append("excel")
@@ -1088,6 +1118,8 @@ class App(tk.Tk):
                     self.log_q.put(line)
                 rc = proc.wait()
                 acc["last_run"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+                acc["last_session"] = session
+                acc["last_update"] = datetime.now().strftime("%Y-%m-%d %H:%M")
                 save_accounts(self.accounts)
                 self.log_q.put(f"--- {name} finished exit={rc} ---\n")
             self.log_q.put(f"\nComplete. Folder: {save_root}\\{day}\\{session}\n")
@@ -1108,6 +1140,17 @@ class App(tk.Tk):
             pass
         self.status.config(text="Ready")
         self.refresh_tree()
+        try:
+            self.refresh_summary()
+        except Exception:
+            pass
+        try:
+            s = load_settings()
+            s["gsheet_url"] = self.gsheet_var.get().strip()
+            s["master_path"] = self.master_var.get().strip()
+            save_settings(s)
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":
