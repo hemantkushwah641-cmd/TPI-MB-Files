@@ -68,25 +68,90 @@ def track_key(row: dict) -> str:
     return f"{sid}|{mb}|{loa}|{tpi}"
 
 
+def _onedrive_mounts() -> list[tuple[Path, str]]:
+    """Windows: local OneDrive folder → SharePoint/OneDrive web root."""
+    out: list[tuple[Path, str]] = []
+    try:
+        import winreg
+    except ImportError:
+        return out
+
+    def _enum(root, path):
+        try:
+            key = winreg.OpenKey(root, path)
+        except OSError:
+            return
+        i = 0
+        while True:
+            try:
+                subname = winreg.EnumKey(key, i)
+            except OSError:
+                break
+            i += 1
+            try:
+                sub = winreg.OpenKey(key, subname)
+            except OSError:
+                continue
+
+            def gv(*names):
+                for n in names:
+                    try:
+                        v = winreg.QueryValueEx(sub, n)[0]
+                        if v:
+                            return str(v)
+                    except OSError:
+                        continue
+                return ""
+
+            mount = gv("MountPoint", "UserFolder", "DisplayNamePath")
+            url = gv("UrlNamespace", "Url", "WebPath", "SharePointUrl", "LibraryUrl")
+            if mount and url and url.lower().startswith("http"):
+                out.append((Path(mount), url.rstrip("/")))
+            try:
+                winreg.CloseKey(sub)
+            except OSError:
+                pass
+        try:
+            winreg.CloseKey(key)
+        except OSError:
+            pass
+
+    _enum(winreg.HKEY_CURRENT_USER, r"Software\SyncEngines\Providers\OneDrive")
+    for acct in ("Business1", "Business2", "Personal"):
+        _enum(winreg.HKEY_CURRENT_USER, rf"Software\Microsoft\OneDrive\Accounts\{acct}")
+    return out
+
+
 def kautilya_data_url(folder: str) -> str:
-    """OneDrive/SharePoint web URL for a local bill folder. Display text is Kautilya Data."""
+    """https:// OneDrive/SharePoint URL only — never C:\\ or file://."""
     folder = str(folder or "").strip()
     if not folder:
         return ""
-    if folder.lower().startswith(("http://", "https://")):
+    if folder.lower().startswith("https://"):
         return folder
+    if folder.lower().startswith("http://") or folder.lower().startswith("file:"):
+        return ""
+    try:
+        local = Path(folder).resolve()
+    except Exception:
+        return ""
+
     web = (os.getenv("TPI_ONEDRIVE_WEB") or "").strip().rstrip("/")
     root = (os.getenv("DOWNLOAD_DIR") or "").strip()
-    if web and root:
+    if web.lower().startswith("https://") and root:
         try:
-            rel = Path(folder).resolve().relative_to(Path(root).resolve())
+            rel = local.relative_to(Path(root).resolve())
             return web + "/" + "/".join(quote(str(p)) for p in rel.parts)
         except Exception:
             pass
-    try:
-        return Path(folder).as_uri()
-    except Exception:
-        return folder
+
+    for mount, url in _onedrive_mounts():
+        try:
+            rel = local.relative_to(mount.resolve())
+        except Exception:
+            continue
+        return url.rstrip("/") + "/" + "/".join(quote(str(p)) for p in rel.parts)
+    return ""
 
 
 def snapshot_name(session: str = "") -> str:
@@ -108,20 +173,38 @@ def load_master(path: Path | None = None) -> list[dict]:
     if not path.exists():
         return []
     try:
-        wb = load_workbook(path, data_only=True, read_only=True)
+        wb = load_workbook(path, data_only=False)
         ws = wb.active
-        rows = list(ws.iter_rows(values_only=True))
-        wb.close()
+        rows = list(ws.iter_rows())
     except Exception:
         return []
     if not rows:
+        wb.close()
         return []
-    headers = [str(c or "").strip() for c in rows[0]]
+    headers = [str(c.value or "").strip() for c in rows[0]]
+    try:
+        link_i = headers.index("Folder link")
+    except ValueError:
+        link_i = -1
     out = []
     for raw in rows[1:]:
-        if not raw or all(v is None or str(v).strip() == "" for v in raw):
+        if not raw or all(c.value is None or str(c.value).strip() == "" for c in raw):
             continue
-        out.append(_row_from_excel(headers, raw))
+        vals = tuple(c.value for c in raw)
+        d = _row_from_excel(headers, vals)
+        if link_i >= 0 and link_i < len(raw):
+            cell = raw[link_i]
+            href = ""
+            if cell.hyperlink and getattr(cell.hyperlink, "target", None):
+                href = str(cell.hyperlink.target)
+            elif str(cell.value or "").lower().startswith("https://"):
+                href = str(cell.value)
+            if href.lower().startswith("https://"):
+                d["Folder link"] = href
+            elif str(d.get("Folder link") or "").lower() in ("kautilya data", "open folder"):
+                d["Folder link"] = ""
+        out.append(d)
+    wb.close()
     return out
 
 
@@ -135,14 +218,21 @@ def save_master(rows: list[dict], path: Path | None = None) -> Path:
     for cell in ws[1]:
         cell.font = Font(bold=True)
     link_i = HEADERS.index("Folder link") + 1
+    n_ok = n_miss = 0
     for r in rows:
         ws.append([r.get(h, "") for h in HEADERS])
-        folder = str(r.get("Folder link") or "").strip()
-        if folder and folder.lower() not in ("open folder", "kautilya data"):
-            cell = ws.cell(ws.max_row, link_i)
+        folder = str(r.get("Folder link") or r.get("save_folder") or "").strip()
+        href = kautilya_data_url(folder)
+        cell = ws.cell(ws.max_row, link_i)
+        if href.startswith("https://"):
             cell.value = "Kautilya Data"
-            cell.hyperlink = kautilya_data_url(folder)
+            cell.hyperlink = href
             cell.font = Font(color="0563C1", underline="single")
+            r["Folder link"] = href
+            n_ok += 1
+        else:
+            cell.value = ""
+            n_miss += 1
     ws.auto_filter.ref = ws.dimensions
     ws.freeze_panes = "A2"
     for col in ws.columns:
@@ -154,6 +244,16 @@ def save_master(rows: list[dict], path: Path | None = None) -> Path:
             wb.save(path.with_name(snapshot_name()))
     except Exception:
         pass
+    if n_miss:
+        print(
+            f"[{datetime.now().strftime('%H:%M:%S')}] Folder link: {n_ok} OneDrive https, {n_miss} skipped (no OneDrive web URL).",
+            flush=True,
+        )
+    else:
+        print(
+            f"[{datetime.now().strftime('%H:%M:%S')}] Folder link: {n_ok} OneDrive https links.",
+            flush=True,
+        )
     return path
 
 
