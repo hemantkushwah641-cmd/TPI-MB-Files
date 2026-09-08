@@ -306,6 +306,12 @@ def write_tpi_output(rows: list[dict], path: Path) -> None:
         width = min(max(len(str(c.value or "")) for c in col) + 2, 55)
         ws.column_dimensions[col[0].column_letter].width = width
     path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        from tpi_master import fill_emb_sheet, save_emb_workbook
+        fill_emb_sheet(wb.create_sheet("EMB"), rows)
+        save_emb_workbook(rows, path.with_name("EMB_Template.xlsx"))
+    except Exception as exc:
+        log(f"EMB sheet: {exc}")
     wb.save(path)
     log(f"TPI output Excel: {path}")
 
