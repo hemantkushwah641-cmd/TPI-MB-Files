@@ -314,20 +314,18 @@ class App(tk.Tk):
 
         mid = ttk.Frame(left)
         mid.pack(fill="x")
-        cols = ("on", "name", "user", "last", "sess", "upd")
+        cols = ("on", "name", "user", "sess", "last")
         self.tree = ttk.Treeview(mid, columns=cols, show="headings", height=3, selectmode="browse")
         self.tree.heading("on", text="On")
         self.tree.heading("name", text="Name")
         self.tree.heading("user", text="Login ID")
-        self.tree.heading("last", text="Last run")
         self.tree.heading("sess", text="Last session")
-        self.tree.heading("upd", text="Last update")
-        self.tree.column("on", width=40, anchor="center")
-        self.tree.column("name", width=120)
-        self.tree.column("user", width=160)
-        self.tree.column("last", width=110)
-        self.tree.column("sess", width=90)
-        self.tree.column("upd", width=110)
+        self.tree.heading("last", text="Last run")
+        self.tree.column("on", width=44, anchor="center")
+        self.tree.column("name", width=130)
+        self.tree.column("user", width=170)
+        self.tree.column("sess", width=100)
+        self.tree.column("last", width=130)
         self.tree.pack(side="left", fill="x", expand=True)
         sb = ttk.Scrollbar(mid, orient="vertical", command=self.tree.yview)
         sb.pack(side="right", fill="y")
@@ -402,6 +400,9 @@ class App(tk.Tk):
         ttk.Label(gf, text="Google Sheet URL (optional)").pack(anchor="w")
         self.gsheet_var = tk.StringVar(value=load_settings().get("gsheet_url") or "")
         ttk.Entry(gf, textvariable=self.gsheet_var).pack(fill="x")
+        ttk.Label(gf, text="OneDrive web URL of Kautilya E-MB folder (optional — for Kautilya Data links)").pack(anchor="w", pady=(6, 0))
+        self.od_var = tk.StringVar(value=load_settings().get("onedrive_web") or "")
+        ttk.Entry(gf, textvariable=self.od_var).pack(fill="x")
 
         ttk.Label(
             tab_up,
@@ -592,9 +593,8 @@ class App(tk.Tk):
                     "YES" if a.get("enabled", True) else "no",
                     a.get("name") or "",
                     a.get("user") or "",
-                    a.get("last_run") or "-",
                     a.get("last_session") or "-",
-                    a.get("last_update") or "-",
+                    a.get("last_run") or "-",
                 ),
             )
 
@@ -1087,6 +1087,7 @@ class App(tk.Tk):
                 env["ACTION_DELAY"] = "0.15"
                 env["PYTHONUNBUFFERED"] = "1"
                 env["TPI_GSHEET"] = self.gsheet_var.get().strip()
+                env["TPI_ONEDRIVE_WEB"] = (getattr(self, "od_var", None) and self.od_var.get().strip()) or ""
                 dls = []
                 if self.dl_excel.get():
                     dls.append("excel")
@@ -1148,6 +1149,8 @@ class App(tk.Tk):
             s = load_settings()
             s["gsheet_url"] = self.gsheet_var.get().strip()
             s["master_path"] = self.master_var.get().strip()
+            if getattr(self, "od_var", None):
+                s["onedrive_web"] = self.od_var.get().strip()
             save_settings(s)
         except Exception:
             pass
