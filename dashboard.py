@@ -346,19 +346,35 @@ class App(tk.Tk):
 
         ttk.Label(
             tab_dl,
-            text="Tick what to pull. Excel-only = bill list in the Session folder (no PDFs).",
+            text="Tick what to pull. Master Excel tracks every portal bill so the next session only fetches remaining data.",
             style="Hint.TLabel",
         ).pack(anchor="w")
+        mf = ttk.Frame(tab_dl)
+        mf.pack(fill="x", pady=(6, 4))
+        ttk.Label(mf, text="Master Excel (all IDs, continues across sessions)").pack(anchor="w")
+        mr = ttk.Frame(mf)
+        mr.pack(fill="x")
+        default_master = ""
+        try:
+            sr = load_settings().get("save_root") or ""
+            default_master = load_settings().get("master_path") or (str(Path(sr) / "tpi_master.xlsx") if sr else "")
+        except Exception:
+            default_master = ""
+        self.master_var = tk.StringVar(value=default_master)
+        ttk.Entry(mr, textvariable=self.master_var).pack(side="left", fill="x", expand=True)
+        ttk.Button(mr, text="Load previous…", command=self.pick_master).pack(side="left", padx=6)
         dlf = ttk.LabelFrame(tab_dl, text="  Download this run  ")
         dlf.pack(fill="x", pady=(8, 8))
         self.dl_excel = tk.BooleanVar(value=True)
         self.dl_mb = tk.BooleanVar(value=False)
         self.dl_docs = tk.BooleanVar(value=False)
-        ttk.Checkbutton(dlf, text="1. Session Excel only (list, no bill open)", variable=self.dl_excel).grid(row=0, column=0, columnspan=2, sticky="w", padx=8, pady=3)
         self.dl_loa = tk.BooleanVar(value=True)
+        self.dl_comments = tk.BooleanVar(value=False)
+        ttk.Checkbutton(dlf, text="1. Session Excel only (list, no bill open)", variable=self.dl_excel).grid(row=0, column=0, columnspan=2, sticky="w", padx=8, pady=3)
         ttk.Checkbutton(dlf, text="1b. Open each bill → LOA Details + Grand Total (no PDF)", variable=self.dl_loa).grid(row=1, column=0, columnspan=2, sticky="w", padx=8, pady=3)
-        ttk.Checkbutton(dlf, text="2. Signed MB PDF + Signed MB Excel + Abstract + comments", variable=self.dl_mb).grid(row=2, column=0, columnspan=2, sticky="w", padx=8, pady=3)
-        ttk.Checkbutton(dlf, text="3. Supporting documents (Uploaded Documents)", variable=self.dl_docs).grid(row=3, column=0, sticky="w", padx=8, pady=3)
+        ttk.Checkbutton(dlf, text="1c. Comments (TPI received date from last TPI comment)", variable=self.dl_comments).grid(row=2, column=0, columnspan=2, sticky="w", padx=8, pady=3)
+        ttk.Checkbutton(dlf, text="2. Signed MB PDF + Signed MB Excel + Abstract", variable=self.dl_mb).grid(row=3, column=0, columnspan=2, sticky="w", padx=8, pady=3)
+        ttk.Checkbutton(dlf, text="3. Supporting documents (Uploaded Documents)", variable=self.dl_docs).grid(row=4, column=0, sticky="w", padx=8, pady=3)
         ttk.Button(dlf, text="Select all", command=self.dl_steps_all).grid(row=0, column=2, padx=8)
         ttk.Button(dlf, text="Clear", command=self.dl_steps_none).grid(row=1, column=2, padx=8)
         runbar = ttk.Frame(tab_dl, padding=(0, 8, 0, 0))
@@ -708,12 +724,14 @@ class App(tk.Tk):
     def dl_steps_all(self):
         self.dl_excel.set(True)
         self.dl_loa.set(True)
+        self.dl_comments.set(True)
         self.dl_mb.set(True)
         self.dl_docs.set(True)
 
     def dl_steps_none(self):
         self.dl_excel.set(False)
         self.dl_loa.set(False)
+        self.dl_comments.set(False)
         self.dl_mb.set(False)
         self.dl_docs.set(False)
 
@@ -849,6 +867,20 @@ class App(tk.Tk):
         self.accounts[i]["enabled"] = not self.accounts[i].get("enabled", True)
         save_accounts(self.accounts)
         self.refresh_tree()
+
+    def pick_master(self):
+        start = self.master_var.get().strip() or self.save_var.get().strip() or str(Path.home())
+        chosen = filedialog.askopenfilename(
+            title="Load previous master Excel",
+            initialdir=str(Path(start).parent if Path(start).suffix else start),
+            filetypes=[("Excel", "*.xlsx"), ("All", "*.*")],
+        )
+        if chosen:
+            self.master_var.set(chosen)
+            s = load_settings()
+            s["master_path"] = chosen
+            save_settings(s)
+            self.write(f"Master Excel: {chosen}\n")
 
     def pick_save(self):
         cur = self.save_var.get().strip() or str(Path.home())
@@ -1018,6 +1050,11 @@ class App(tk.Tk):
                 env["DOWNLOAD_DIR"] = str(save_root)
                 env["TPI_SESSION"] = session
                 env["TPI_CLUSTER"] = name
+                mpath = self.master_var.get().strip()
+                if not mpath:
+                    mpath = str(Path(save_root) / "tpi_master.xlsx")
+                    self.master_var.set(mpath)
+                env["TPI_MASTER"] = mpath
                 env["ACTION_DELAY"] = "0.4"
                 env["PYTHONUNBUFFERED"] = "1"
                 dls = []
@@ -1025,6 +1062,8 @@ class App(tk.Tk):
                     dls.append("excel")
                 if getattr(self, "dl_loa", None) and self.dl_loa.get():
                     dls.append("loa")
+                if getattr(self, "dl_comments", None) and self.dl_comments.get():
+                    dls.append("comments")
                 if self.dl_mb.get():
                     dls.append("mb")
                 if self.dl_docs.get():
