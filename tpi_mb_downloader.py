@@ -1629,6 +1629,9 @@ def download_for_row(page, row: dict, args) -> dict:
     row["district_folder"] = dist
     log(f"  save: {folder}")
     steps = {s.strip() for s in (os.getenv("TPI_DL_STEPS") or "excel,mb,docs").split(",") if s.strip()}
+    extra = row.get("_remain")
+    if isinstance(extra, set) and extra:
+        steps = extra | (steps & {"excel"})
 
     try:
         detail.get_by_text("DOWNLOAD SIGNED MB PDF", exact=False).first.wait_for(
@@ -1647,15 +1650,19 @@ def download_for_row(page, row: dict, args) -> dict:
             row["grand_total"] = str(row["grand_total"]).replace(",", "")
 
     if "mb" in steps:
+        folder.mkdir(parents=True, exist_ok=True)
         pdf = click_download(detail, "DOWNLOAD SIGNED MB PDF", folder)
         row["signed_pdf"] = str(pdf) if pdf else ""
         absf = click_download(detail, "ABSTRACT MB DOWNLOAD", folder)
         row["abstract"] = str(absf) if absf else ""
         xls = click_download(detail, "DOWNLOAD SIGNED MB EXCEL", folder)
         row["signed_excel"] = str(xls) if xls else ""
-        row["comments_file"] = save_comments(detail, folder)
     else:
         row["signed_pdf"] = row["abstract"] = row["signed_excel"] = ""
+    if "comments" in steps:
+        folder.mkdir(parents=True, exist_ok=True)
+        row["comments_file"] = save_comments(detail, folder)
+    else:
         row["comments_file"] = ""
     if "docs" in steps:
         uploads = download_uploaded_docs(detail, folder)
@@ -1667,6 +1674,7 @@ def download_for_row(page, row: dict, args) -> dict:
         row["status"] = "scraped"
     else:
         row["status"] = "downloaded" if ok else "download_failed"
+    row["bill_type"] = bill_type_of(row.get("mb_no") or "")
     row["bill_key"] = bill_key(row)
     if detail != page:
         try:
@@ -1749,7 +1757,17 @@ def main() -> None:
             save_index(index)
             dl_steps = {s.strip() for s in (os.getenv("TPI_DL_STEPS") or "excel,mb,docs").split(",") if s.strip()}
             log(f"Download steps: {sorted(dl_steps)}")
-            need_open = "mb" in dl_steps or "docs" in dl_steps or "loa" in dl_steps
+            need_open = bool({"mb", "docs", "loa", "comments"} & dl_steps)
+
+            from tpi_master import (
+                find_record,
+                load_master,
+                remaining_steps,
+                save_master,
+                upsert_rows,
+            )
+            master_rows = load_master()
+            log(f"Master Excel: {len(master_rows)} existing row(s)")
 
             groups: dict[tuple, list] = defaultdict(list)
             key_groups: dict[str, list] = defaultdict(list)
@@ -1774,23 +1792,20 @@ def main() -> None:
             queue = []
             skipped = []
             for r in selected:
-                rec = None if args.force else already_downloaded(r, index)
-                # 1b LOA + Grand Total must open the bill even if Excel was saved earlier
-                if need_open and "loa" in dl_steps and not (rec and rec.get("grand_total")):
+                rec = find_record(master_rows, r)
+                remain = remaining_steps(rec, dl_steps)
+                r["_remain"] = remain
+                if need_open and remain:
                     queue.append(r)
                     continue
-                if rec and not need_open:
+                if rec and not remain:
                     r["status"] = "skipped_already_downloaded"
-                    r["skip_reason"] = f"already on {rec.get('downloaded_on', '')}"
-                    r["signed_pdf"] = rec.get("signed_pdf", "")
-                    r["abstract"] = rec.get("abstract", "")
+                    r["skip_reason"] = "master: requested data already downloaded"
+                    r["tpi_level_date"] = rec.get("TPI Received Date") or ""
+                    r["grand_total"] = rec.get("Grand Total") or ""
+                    r["district"] = rec.get("District Name") or r.get("district")
                     skipped.append(r)
-                    log(f"  SKIP {r.get('scheme_id')} {r.get('mb_no')} — index")
-                elif not args.force and already_on_disk(r, on_disk) and "loa" not in dl_steps and "mb" not in dl_steps:
-                    r["status"] = "skipped_already_downloaded"
-                    r["skip_reason"] = "folder pehle se Kautilya E-MB mein"
-                    skipped.append(r)
-                    log(f"  SKIP {r.get('scheme_id')} {r.get('mb_no')} — disk pe hai")
+                    log(f"  SKIP {r.get('scheme_id')} {r.get('mb_no')} — already in master")
                 else:
                     queue.append(r)
             if args.limit:
@@ -1868,6 +1883,15 @@ def main() -> None:
             except Exception as exc:
                 log(f"activity log: {exc}")
             merge_session_master(sess_dir)
+            try:
+                master_rows = upsert_rows(master_rows, selected, {"excel"}, args.session)
+                opened = [r for r in done if r.get("status") in ("downloaded", "scraped")]
+                master_rows = upsert_rows(master_rows, opened, dl_steps, args.session)
+                mpath = save_master(master_rows)
+                log(f"Master Excel ({len(master_rows)} bills): {mpath}")
+                save_master(master_rows, sess_dir / "tpi_master.xlsx")
+            except Exception as exc:
+                log(f"master excel: {exc}")
             by_dist: dict[str, int] = defaultdict(int)
             for r in done:
                 if r.get("status") == "downloaded":
