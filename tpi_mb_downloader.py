@@ -748,24 +748,19 @@ def back_to_tpi_list(page) -> None:
         click_detail_back(page)
         if table_ready(page):
             return
-        click_sidebar(page, "TPI (Third Party Inspection Civil)")
-        page.wait_for_timeout(1500)
-        dismiss_popups(page, wait_ms=800)
-        if table_ready(page):
-            return
         open_list_url(page)
         if table_ready(page):
             log("  list via URL")
             return
+        click_sidebar(page, "TPI (Third Party Inspection Civil)")
+        if table_ready(page):
+            return
     click_sidebar(page, "TPI (Third Party Inspection Civil)")
-    page.wait_for_timeout(1500)
     if table_ready(page):
         return
     expand_measurements(page)
     click_sidebar(page, "Normal Measurement")
-    page.wait_for_timeout(400)
     click_sidebar(page, "TPI (Third Party Inspection Civil)")
-    page.wait_for_timeout(1500)
     if table_ready(page):
         return
     open_list_url(page)
@@ -1100,8 +1095,8 @@ def open_row(page, row: dict):
         save_debug(page, f"no_inner_search_{key}")
         raise RuntimeError(f"Search by LoA Number box nahi mili: {info}")
 
-    page.wait_for_timeout(2000)
-    dismiss_popups(page, wait_ms=400)
+    page.wait_for_timeout(700)
+    dismiss_popups(page, wait_ms=200)
 
     mb = str(row.get("mb_no") or "").strip()
     nvis = page.evaluate(
@@ -1113,8 +1108,8 @@ def open_row(page, row: dict):
     log(f"  matching rows after search: {nvis} (scheme {key} mb {mb})")
 
     def after_click(tag: str):
-        page.wait_for_timeout(2500)
-        dismiss_popups(page, wait_ms=500)
+        page.wait_for_timeout(900)
+        dismiss_popups(page, wait_ms=250)
         for p in page.context.pages:
             if p not in old_pages:
                 try:
@@ -1536,7 +1531,7 @@ def read_loa_details(page) -> dict:
             hdr.first.click(timeout=4000)
         else:
             page.get_by_text("LoA Details", exact=False).first.click(timeout=4000)
-        page.wait_for_timeout(900)
+        page.wait_for_timeout(350)
     except Exception:
         pass
     info = page.evaluate(
@@ -1820,8 +1815,11 @@ def main() -> None:
             done = list(skipped)
             want_files = need_open
             if want_files:
+                total = len(queue)
+                log(f"PROGRESS 0/{total} Download in progress")
                 for idx, row in enumerate(queue, 1):
-                    log(f"[{idx}/{len(queue)}] {row.get('date')} | {row.get('scheme')} | {row.get('scheme_id')} | {row.get('mb_no')}")
+                    log(f"PROGRESS {idx}/{total} Download in progress")
+                    log(f"[{idx}/{total}] {row.get('date')} | {row.get('scheme')} | {row.get('scheme_id')} | {row.get('mb_no')}")
                     try:
                         if idx > 1 or not table_ready(page):
                             go_to_tpi_list(page)
@@ -1890,6 +1888,12 @@ def main() -> None:
                 mpath = save_master(master_rows)
                 log(f"Master Excel ({len(master_rows)} bills): {mpath}")
                 save_master(master_rows, sess_dir / "tpi_master.xlsx")
+                gurl = (os.getenv("TPI_GSHEET") or "").strip()
+                if gurl:
+                    from tpi_master import sync_gsheet
+                    msg = sync_gsheet(mpath, gurl)
+                    if msg:
+                        log(msg)
             except Exception as exc:
                 log(f"master excel: {exc}")
             by_dist: dict[str, int] = defaultdict(int)
