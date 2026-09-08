@@ -6,6 +6,8 @@ import re
 from datetime import datetime
 from pathlib import Path
 
+from urllib.parse import quote
+
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font
 
@@ -66,6 +68,27 @@ def track_key(row: dict) -> str:
     return f"{sid}|{mb}|{loa}|{tpi}"
 
 
+def kautilya_data_url(folder: str) -> str:
+    """OneDrive/SharePoint web URL for a local bill folder. Display text is Kautilya Data."""
+    folder = str(folder or "").strip()
+    if not folder:
+        return ""
+    if folder.lower().startswith(("http://", "https://")):
+        return folder
+    web = (os.getenv("TPI_ONEDRIVE_WEB") or "").strip().rstrip("/")
+    root = (os.getenv("DOWNLOAD_DIR") or "").strip()
+    if web and root:
+        try:
+            rel = Path(folder).resolve().relative_to(Path(root).resolve())
+            return web + "/" + "/".join(quote(str(p)) for p in rel.parts)
+        except Exception:
+            pass
+    try:
+        return Path(folder).as_uri()
+    except Exception:
+        return folder
+
+
 def snapshot_name(session: str = "") -> str:
     sess = (session or os.getenv("TPI_SESSION") or "Session").strip() or "Session"
     sess = re.sub(r'[<>:"/\\|?*]', "-", sess)
@@ -115,16 +138,10 @@ def save_master(rows: list[dict], path: Path | None = None) -> Path:
     for r in rows:
         ws.append([r.get(h, "") for h in HEADERS])
         folder = str(r.get("Folder link") or "").strip()
-        if folder and folder.lower() not in ("open folder",):
+        if folder and folder.lower() not in ("open folder", "kautilya data"):
             cell = ws.cell(ws.max_row, link_i)
-            href = folder
-            if not href.lower().startswith(("http://", "https://", "file:")):
-                try:
-                    href = Path(folder).as_uri()
-                except Exception:
-                    href = folder
-            cell.value = "Open folder"
-            cell.hyperlink = href
+            cell.value = "Kautilya Data"
+            cell.hyperlink = kautilya_data_url(folder)
             cell.font = Font(color="0563C1", underline="single")
     ws.auto_filter.ref = ws.dimensions
     ws.freeze_panes = "A2"
