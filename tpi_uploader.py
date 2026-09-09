@@ -458,75 +458,152 @@ def click_attach_signature(page) -> bool:
 
 
 def select_action(page, btype: str) -> bool:
-    """After Save Draft: click the Select One box under Action, then Return or Forward."""
+    """Click the Select One box under Action:, then Return or Forward in the list."""
     want = "return" if btype == "return" else "forward"
     log(f"  Action: pick {want}")
-    try:
-        page.evaluate(
-            """() => {
-                const nodes = [...document.querySelectorAll('label,div,span,p,strong')].filter(e => {
-                    const t = (e.innerText || '').replace(/\\s+/g, ' ').trim();
-                    const r = e.getBoundingClientRect();
-                    return /^(Action:?)$/i.test(t) && r.height && r.height < 36 && r.width < 200;
-                });
-                const n = nodes[nodes.length - 1];
-                if (n) n.scrollIntoView({block: 'center'});
-            }"""
-        )
-    except Exception:
-        pass
-    page.wait_for_timeout(400)
-    opened = False
-    try:
-        box = page.get_by_text("Select One", exact=True).last
-        box.scroll_into_view_if_needed()
-        box.click(timeout=5000)
-        opened = True
-        log("  clicked Select One under Action")
-    except Exception as exc:
-        log(f"  Select One click: {exc}")
-    if not opened:
-        opened = page.evaluate(
-            """() => {
-                const norm = t => (t || '').replace(/\\s+/g, ' ').trim();
-                const el = [...document.querySelectorAll('div,span,input,ng-select,button')].reverse().find(e => {
-                    const r = e.getBoundingClientRect();
-                    const t = norm(e.innerText || e.placeholder || '');
-                    return r.width > 240 && r.height > 28 && r.height < 56 && /^select one$/i.test(t);
-                });
-                if (!el) return false;
-                el.scrollIntoView({block: 'center'});
-                el.click();
-                return true;
-            }"""
-        )
-        log(f"  Select One js click: {opened}")
-    if not opened:
-        save_debug(page, "action_select_fail")
-        return False
-    page.wait_for_timeout(500)
-    # Overlay option only — never the hidden red RETURN TO AE button
-    picked = page.evaluate(
-        """(want) => {
+    loc = page.evaluate(
+        """() => {
             const norm = t => (t || '').replace(/\\s+/g, ' ').trim();
-            const items = [...document.querySelectorAll('div, span, li, a, p')].filter(e => {
-                if ((e.tagName || '') === 'BUTTON' || e.closest('button')) return false;
+            const labs = [...document.querySelectorAll('label,div,span,p,strong')].filter(e => {
                 const t = norm(e.innerText);
                 const r = e.getBoundingClientRect();
-                if (!r.width || r.height < 16 || r.height > 46) return false;
+                return (t === 'Action:' || t === 'Action') && r.height > 0 && r.height < 40 && r.width < 220;
+            });
+            labs.sort((a, b) => b.getBoundingClientRect().y - a.getBoundingClientRect().y);
+            const lab = labs[0];
+            if (lab) lab.scrollIntoView({block: 'center'});
+            const lr = lab ? lab.getBoundingClientRect() : {bottom: 0};
+            const actionSelects = [...document.querySelectorAll('select')].map((s, i) => ({
+                i,
+                opts: [...s.options].map(o => (o.text || '').trim()),
+            })).filter(s => s.opts.some(o => /return to|forward to/i.test(o)));
+            const under = [...document.querySelectorAll(
+                'select, ng-select, [role="combobox"], .ng-select, input, div, button'
+            )].find(e => {
+                const r = e.getBoundingClientRect();
+                if (r.width < 180 || r.height < 20 || r.height > 70) return false;
+                if (r.y < lr.bottom - 8 || r.y > lr.bottom + 130) return false;
+                const t = norm(e.innerText || e.value || e.placeholder || '');
+                return /select one/i.test(t) || e.tagName === 'SELECT' || e.tagName === 'NG-SELECT';
+            });
+            if (!under && !actionSelects.length) {
+                return {ok: false, nlab: labs.length, ly: lr.bottom, nsel: actionSelects.length};
+            }
+            const el = under || document.querySelectorAll('select')[actionSelects[0].i];
+            const r = el.getBoundingClientRect();
+            return {
+                ok: true,
+                tag: el.tagName,
+                x: r.x + r.width * 0.5,
+                y: r.y + r.height * 0.5,
+                w: Math.round(r.width),
+                h: Math.round(r.height),
+                opts: el.tagName === 'SELECT' ? [...el.options].map(o => (o.text || '').trim()) : [],
+                selIndex: actionSelects.length ? actionSelects[0].i : -1,
+                t: norm(el.innerText || el.placeholder || ''),
+            };
+        }"""
+    )
+    # JS ternary instead of Python leaked — rewrite loc if broken
+    log(f"  Action control: { {k: loc.get(k) for k in ('ok','tag','w','h','t','opts') if loc} }")
+    if not loc or not loc.get("ok"):
+        # fallback: last native select that has Return/Forward options
+        hit_i = None
+        hit_label = None
+        try:
+            n = page.locator("select").count()
+            for i in range(n):
+                opts = [o.strip() for o in page.locator("select").nth(i).locator("option").all_text_contents()]
+                match = next(
+                    (
+                        o
+                        for o in opts
+                        if (want == "return" and re.search(r"return", o, re.I))
+                        or (want == "forward" and re.search(r"forward", o, re.I))
+                    ),
+                    None,
+                )
+                if match:
+                    hit_i, hit_label = i, match
+                    break
+        except Exception as exc:
+            log(f"  select scan: {exc}")
+        if hit_i is not None:
+            sel = page.locator("select").nth(hit_i)
+            sel.scroll_into_view_if_needed()
+            sel.select_option(label=hit_label)
+            try:
+                sel.dispatch_event("change")
+                sel.dispatch_event("input")
+            except Exception:
+                pass
+            log(f"  native select -> {hit_label}")
+            page.wait_for_timeout(600)
+            if _wait_button(page, r"generate otp", 8000):
+                log("  GENERATE OTP appeared")
+                return True
+        save_debug(page, "action_select_fail")
+        return False
+
+    opts = loc.get("opts") or []
+    hit_label = next(
+        (
+            o
+            for o in opts
+            if (want == "return" and re.search(r"return", o, re.I))
+            or (want == "forward" and re.search(r"forward", o, re.I))
+        ),
+        None,
+    )
+    if hit_label:
+        n = page.locator("select").count()
+        for i in range(n):
+            labels = [o.strip() for o in page.locator("select").nth(i).locator("option").all_text_contents()]
+            if hit_label in labels:
+                sel = page.locator("select").nth(i)
+                sel.scroll_into_view_if_needed()
+                sel.select_option(label=hit_label)
+                try:
+                    sel.dispatch_event("change")
+                    sel.dispatch_event("input")
+                except Exception:
+                    pass
+                log(f"  native select -> {hit_label}")
+                page.wait_for_timeout(700)
+                if _wait_button(page, r"generate otp", 10000):
+                    log("  GENERATE OTP appeared")
+                    return True
+                break
+
+    # Custom dropdown: real mouse click on the Select One box
+    x, y = float(loc["x"]), float(loc["y"])
+    page.mouse.click(x, y)
+    log(f"  mouse click Select One at {int(x)},{int(y)}")
+    page.wait_for_timeout(500)
+    opt = page.evaluate(
+        """(want) => {
+            const norm = t => (t || '').replace(/\\s+/g, ' ').trim();
+            const items = [...document.querySelectorAll('div, span, li, a, p, option')].filter(e => {
+                if ((e.tagName || '') === 'BUTTON' || e.closest('button.btn')) return false;
+                const t = norm(e.innerText);
+                const r = e.getBoundingClientRect();
+                if (r.width < 80 || r.height < 16 || r.height > 48) return false;
                 if (t.length < 10 || t.length > 90) return false;
                 if (/select one|save as draft|generate otp|attach digital/i.test(t)) return false;
                 return want === 'return' ? /^Return To AE/i.test(t) : /^Forward To /i.test(t);
             });
             items.sort((a, b) => norm(a.innerText).length - norm(b.innerText).length);
-            if (!items.length) return {ok: false, n: 0};
-            items[0].click();
-            return {ok: true, picked: norm(items[0].innerText)};
+            if (!items.length) return {ok: false};
+            const r = items[0].getBoundingClientRect();
+            return {ok: true, x: r.x + r.width / 2, y: r.y + r.height / 2, picked: norm(items[0].innerText)};
         }""",
         want,
     )
-    log(f"  Action option: {picked}")
-    if not picked or not picked.get("ok"):
+    log(f"  overlay: {opt}")
+    if opt and opt.get("ok"):
+        page.mouse.click(float(opt["x"]), float(opt["y"]))
+        log(f"  mouse click option: {opt.get('picked')}")
+    else:
         save_debug(page, "action_select_fail")
         return False
     page.wait_for_timeout(700)
