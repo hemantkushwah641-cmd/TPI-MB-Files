@@ -391,6 +391,15 @@ def click_save_as_draft(page) -> bool:
             return False
         if re.search(r"save successfully|Success", msg or "", re.I):
             log("  SAVE AS DRAFT — Data save successfully")
+            try:
+                page.wait_for_load_state("domcontentloaded", timeout=8000)
+            except Exception:
+                pass
+            page.wait_for_timeout(800)
+            try:
+                dismiss_popups(page)
+            except Exception:
+                pass
             return True
         # fallback: maybe modal already gone
         try:
@@ -457,11 +466,73 @@ def click_attach_signature(page) -> bool:
         return False
 
 
+def wait_page_ready(page) -> None:
+    for state, ms in (("domcontentloaded", 8000), ("load", 8000), ("networkidle", 4000)):
+        try:
+            page.wait_for_load_state(state, timeout=ms)
+        except Exception:
+            pass
+    try:
+        dismiss_popups(page)
+    except Exception:
+        pass
+    page.wait_for_timeout(500)
+
+
+def wait_select_one(page, ms: int = 15000) -> bool:
+    """Save Draft ke baad Action > Select One visible hone tak wait."""
+    deadline = datetime.now().timestamp() + ms / 1000
+    while datetime.now().timestamp() < deadline:
+        try:
+            loc = page.get_by_text("Select One", exact=True)
+            if loc.count():
+                loc.last.scroll_into_view_if_needed()
+                if loc.last.is_visible():
+                    log("  Select One is visible")
+                    return True
+        except Exception as exc:
+            s = str(exc).lower()
+            if "execution context" in s or "navigation" in s or "destroyed" in s:
+                try:
+                    page.wait_for_load_state("domcontentloaded", timeout=5000)
+                except Exception:
+                    pass
+            page.wait_for_timeout(400)
+            continue
+        page.wait_for_timeout(250)
+    log("  Select One not visible yet")
+    return False
+
+
+def safe_evaluate(page, script, arg=None, retries: int = 5):
+    last = None
+    for i in range(retries):
+        try:
+            return page.evaluate(script) if arg is None else page.evaluate(script, arg)
+        except Exception as exc:
+            last = exc
+            s = str(exc).lower()
+            if "execution context" in s or "navigation" in s or "destroyed" in s or "target closed" in s:
+                log(f"  page still loading, retry evaluate ({i + 1})")
+                try:
+                    page.wait_for_load_state("domcontentloaded", timeout=8000)
+                except Exception:
+                    pass
+                page.wait_for_timeout(700)
+                continue
+            raise
+    log(f"  evaluate failed: {last}")
+    return None
+
+
 def select_action(page, btype: str) -> bool:
     """Click the Select One box under Action:, then Return or Forward in the list."""
     want = "return" if btype == "return" else "forward"
     log(f"  Action: pick {want}")
-    loc = page.evaluate(
+    wait_page_ready(page)
+    wait_select_one(page)
+    loc = safe_evaluate(
+        page,
         """() => {
             const norm = t => (t || '').replace(/\\s+/g, ' ').trim();
             const labs = [...document.querySelectorAll('label,div,span,p,strong')].filter(e => {
@@ -580,7 +651,8 @@ def select_action(page, btype: str) -> bool:
     page.mouse.click(x, y)
     log(f"  mouse click Select One at {int(x)},{int(y)}")
     page.wait_for_timeout(500)
-    opt = page.evaluate(
+    opt = safe_evaluate(
+        page,
         """(want) => {
             const norm = t => (t || '').replace(/\\s+/g, ' ').trim();
             const items = [...document.querySelectorAll('div, span, li, a, p, option')].filter(e => {
@@ -891,6 +963,9 @@ def main() -> None:
                             log("  retry fill letter + save")
                             fill_tpi_fields(detail, fill)
                             saved = click_save_as_draft(detail)
+                        log("  waiting for Action box after Save Draft...")
+                        wait_page_ready(detail)
+                        wait_select_one(detail)
                     if "dsc" in steps and btype == "forward":
                         click_attach_signature(detail)
                     elif "dsc" in steps:
