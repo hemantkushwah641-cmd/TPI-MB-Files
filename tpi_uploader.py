@@ -251,7 +251,7 @@ def upload_files_on_detail(page, files: list[str]) -> list[str]:
     return saved
 
 
-def _type_into(page, loc, value: str) -> bool:
+def _type_into(page, loc, value: str, tab: bool = True) -> bool:
     """Angular fields ignore paste — type like a keyboard."""
     value = str(value)
     try:
@@ -272,8 +272,9 @@ def _type_into(page, loc, value: str) -> bool:
     page.wait_for_timeout(80)
     page.keyboard.type(value, delay=70)
     page.wait_for_timeout(150)
-    loc.press("Tab")
-    page.wait_for_timeout(250)
+    if tab:
+        loc.press("Tab")
+        page.wait_for_timeout(250)
     try:
         got = loc.input_value()
     except Exception:
@@ -283,8 +284,9 @@ def _type_into(page, loc, value: str) -> bool:
         loc.press("Control+A")
         loc.press("Backspace")
         page.keyboard.type(value, delay=90)
-        loc.press("Tab")
-        page.wait_for_timeout(200)
+        if tab:
+            loc.press("Tab")
+            page.wait_for_timeout(200)
         try:
             got = loc.input_value()
         except Exception:
@@ -856,37 +858,66 @@ def generate_otp_and_submit(page, btype: str) -> bool:
         if otp is not None:
             break
     if otp is not None:
-        _type_into(page, otp, "000000")
+        _type_into(page, otp, "000000", tab=False)
         log("  OTP typed 000000")
     else:
         log("  OTP box not found (visible)")
         save_debug(page, "otp_missing")
         return False
-    page.wait_for_timeout(500)
-    btn_pat = r"return to" if btype == "return" else r"forward to"
-    if not _wait_button(page, btn_pat, 8000):
-        log(f"  final {btype} button not found")
-        save_debug(page, "final_action_missing")
-        return False
-    clicked = page.evaluate(
-        """(want) => {
-            const btns = [...document.querySelectorAll('button, a.btn, .btn')].filter(b => {
-                const t = (b.innerText || '').replace(/\\s+/g, ' ').trim();
-                const r = b.getBoundingClientRect();
-                if (!r.width || !r.height) return false;
-                if (/save as draft|generate otp|attach digital|upload|select one/i.test(t)) return false;
-                if (want === 'return') return /return\\s+to/i.test(t);
-                return /forward\\s+to/i.test(t);
-            });
-            if (!btns.length) return {ok: false};
-            const t = (btns[0].innerText || '').replace(/\\s+/g, ' ').trim();
-            btns[0].click();
-            return {ok: true, text: t};
-        }""",
-        "return" if btype == "return" else "forward",
-    )
-    log(f"  clicked final action: {clicked}")
-    if not clicked or not clicked.get("ok"):
+    try:
+        page.keyboard.press("Escape")
+    except Exception:
+        pass
+    page.wait_for_timeout(400)
+    # Click the footer colored button only — never the Action dropdown.
+    clicked = False
+    try:
+        if btype == "return":
+            btn = page.locator("button.btn-danger, button.btn.btn-danger").filter(
+                has_text=re.compile(r"return\s+to", re.I)
+            )
+        else:
+            btn = page.get_by_role("button", name=re.compile(r"forward\s+to", re.I))
+        for i in range(btn.count()):
+            el = btn.nth(i)
+            try:
+                if not el.is_visible():
+                    continue
+                box = el.bounding_box()
+                if not box or box["height"] < 20:
+                    continue
+                el.scroll_into_view_if_needed(timeout=3000)
+                el.click(timeout=5000)
+                log(f"  clicked footer button: {el.inner_text()[:60]}")
+                clicked = True
+                break
+            except Exception as exc:
+                log(f"  footer btn {i}: {exc}")
+    except Exception as exc:
+        log(f"  footer locate: {exc}")
+    if not clicked:
+        clicked_js = page.evaluate(
+            """(want) => {
+                const btns = [...document.querySelectorAll('button')].filter(b => {
+                    const t = (b.innerText || '').replace(/\\s+/g, ' ').trim();
+                    const r = b.getBoundingClientRect();
+                    if (r.width < 40 || r.height < 20) return false;
+                    if (b.closest('ng-select, .ng-select, .ng-dropdown-panel, .cdk-overlay-pane')) return false;
+                    if (/save as draft|generate otp|attach digital|upload|select one/i.test(t)) return false;
+                    const cls = (b.className || '').toString();
+                    if (want === 'return') return /return\\s+to/i.test(t) && /danger/.test(cls);
+                    return /forward\\s+to/i.test(t);
+                });
+                if (!btns.length) return {ok: false};
+                const t = (btns[0].innerText || '').replace(/\\s+/g, ' ').trim();
+                btns[0].click();
+                return {ok: true, text: t};
+            }""",
+            "return" if btype == "return" else "forward",
+        )
+        log(f"  clicked final action js: {clicked_js}")
+        clicked = bool(clicked_js and clicked_js.get("ok"))
+    if not clicked:
         save_debug(page, "final_action_fail")
         return False
     page.wait_for_timeout(600)
