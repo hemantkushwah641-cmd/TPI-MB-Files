@@ -633,6 +633,65 @@ def _click_overlay_option(page, want: str) -> bool:
     return False
 
 
+def _action_current_text(page) -> str:
+    try:
+        return page.evaluate(
+            """() => {
+                const norm = t => (t || '').replace(/\\s+/g, ' ').trim();
+                const labs = [...document.querySelectorAll('label,div,span,p,strong')].filter(e => {
+                    const t = norm(e.innerText);
+                    const r = e.getBoundingClientRect();
+                    return (t === 'Action:' || t === 'Action') && r.height > 0 && r.height < 40 && r.width < 220;
+                });
+                labs.sort((a, b) => b.getBoundingClientRect().y - a.getBoundingClientRect().y);
+                const lab = labs[0];
+                if (!lab) return '';
+                const el = lab.nextElementSibling || lab.parentElement;
+                return norm((el && el.innerText) || '');
+            }"""
+        ) or ""
+    except Exception:
+        return ""
+
+
+def _otp_field_visible(page) -> bool:
+    try:
+        if page.get_by_text(re.compile(r"Please Enter OTP", re.I)).count():
+            return True
+        if page.get_by_placeholder(re.compile(r"otp", re.I)).count():
+            loc = page.get_by_placeholder(re.compile(r"otp", re.I)).first
+            return loc.is_visible()
+    except Exception:
+        pass
+    return False
+
+
+def _pick_from_open_list(page, want: str) -> bool:
+    """ng-select: type Return/Forward then Enter (works even if list opens over OTP)."""
+    word = "Return" if want == "return" else "Forward"
+    try:
+        page.keyboard.type(word, delay=50)
+        page.wait_for_timeout(250)
+        page.keyboard.press("Enter")
+        log(f"  keyboard typed '{word}' + Enter")
+        page.wait_for_timeout(400)
+        return True
+    except Exception as exc:
+        log(f"  keyboard type: {exc}")
+    try:
+        downs = 2 if want == "return" else 1
+        for _ in range(downs):
+            page.keyboard.press("ArrowDown")
+            page.wait_for_timeout(150)
+        page.keyboard.press("Enter")
+        log(f"  keyboard ArrowDown x{downs} + Enter")
+        page.wait_for_timeout(400)
+        return True
+    except Exception as exc:
+        log(f"  keyboard arrows: {exc}")
+    return False
+
+
 def select_action(page, btype: str) -> bool:
     """Click Select One under Action, then Return or Forward. Retries if page reloads."""
     want = "return" if btype == "return" else "forward"
@@ -641,25 +700,37 @@ def select_action(page, btype: str) -> bool:
     for attempt in range(4):
         try:
             settle_detail(page)
+            if _otp_field_visible(page):
+                log("  OTP field already on page - Action already selected")
+                return True
             if _wait_button(page, r"generate otp", 1500):
                 log("  GENERATE OTP already visible - Action already selected")
                 return True
+            cur = _action_current_text(page)
+            log(f"  Action box now: {cur[:80]}")
+            if want == "return" and re.search(r"return\s+to", cur, re.I):
+                log("  Action already Return")
+                if _wait_button(page, r"generate otp", 5000) or _otp_field_visible(page):
+                    return True
+            if want == "forward" and re.search(r"forward\s+to", cur, re.I):
+                log("  Action already Forward")
+                if _wait_button(page, r"generate otp", 5000) or _otp_field_visible(page):
+                    return True
             _scroll_action_into_view(page)
             if _native_action_select(page, want):
-                if _wait_button(page, r"generate otp", 8000):
-                    log("  GENERATE OTP appeared")
+                if _wait_button(page, r"generate otp", 8000) or _otp_field_visible(page):
+                    log("  GENERATE OTP / OTP field appeared")
                     return True
             if not _click_select_one(page):
                 last = "Select One not clickable"
                 continue
+            page.wait_for_timeout(400)
+            _pick_from_open_list(page, want)
+            if not (_wait_button(page, r"generate otp", 2500) or _otp_field_visible(page)):
+                _click_overlay_option(page, want)
             page.wait_for_timeout(500)
-            if not _click_overlay_option(page, want):
-                last = "overlay option not clicked"
-                save_debug(page, "action_overlay_fail")
-                continue
-            page.wait_for_timeout(700)
-            if _wait_button(page, r"generate otp", 10000):
-                log("  GENERATE OTP appeared")
+            if _wait_button(page, r"generate otp", 8000) or _otp_field_visible(page):
+                log("  GENERATE OTP / OTP field appeared")
                 return True
             last = "GENERATE OTP not visible"
             save_debug(page, "action_no_otp_btn")
@@ -701,30 +772,38 @@ def _wait_button(page, pattern: str, ms: int = 8000) -> bool:
 
 
 def generate_otp_and_submit(page, btype: str) -> bool:
-    if not _wait_button(page, r"generate otp", 10000):
+    if _otp_field_visible(page):
+        log("  OTP field already visible - skip GENERATE OTP click")
+    elif not _wait_button(page, r"generate otp", 10000):
         log("  GENERATE OTP button not visible yet")
         save_debug(page, "no_generate_otp")
         return False
+    else:
+        try:
+            btn = page.get_by_role("button", name=re.compile("generate otp", re.I))
+            if btn.count():
+                btn.first.click(timeout=8000)
+            else:
+                page.evaluate(
+                    """() => {
+                        const b = [...document.querySelectorAll('button,a,.btn')].find(e =>
+                            /generate otp/i.test(e.innerText || '')
+                        );
+                        if (b) b.click();
+                    }"""
+                )
+            log("  clicked GENERATE OTP")
+        except Exception as exc:
+            log(f"  GENERATE OTP: {exc}")
+            return False
+        page.wait_for_timeout(600)
+        click_modal_ok(page, wait_ms=12000)
+        page.wait_for_timeout(400)
     try:
-        btn = page.get_by_role("button", name=re.compile("generate otp", re.I))
-        if btn.count():
-            btn.first.click(timeout=8000)
-        else:
-            page.evaluate(
-                """() => {
-                    const b = [...document.querySelectorAll('button,a,.btn')].find(e =>
-                        /generate otp/i.test(e.innerText || '')
-                    );
-                    if (b) b.click();
-                }"""
-            )
-        log("  clicked GENERATE OTP")
-    except Exception as exc:
-        log(f"  GENERATE OTP: {exc}")
-        return False
-    page.wait_for_timeout(600)
-    click_modal_ok(page, wait_ms=12000)
-    page.wait_for_timeout(400)
+        page.keyboard.press("Escape")
+    except Exception:
+        pass
+    page.wait_for_timeout(200)
     otp = page.get_by_placeholder(re.compile("otp", re.I))
     if otp.count() == 0:
         otp = page.locator("xpath=//*[contains(normalize-space(.),'Please Enter OTP')][1]/following::input[1]")
