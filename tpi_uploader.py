@@ -458,85 +458,126 @@ def click_attach_signature(page) -> bool:
 
 
 def select_action(page, btype: str) -> bool:
-    """Portal shows Civil or E&M options itself. We only pick Forward vs Return."""
+    """Click Action: box (Select One), then Return / Forward. Civil vs E&M is automatic."""
     want = "return" if btype == "return" else "forward"
     log(f"  Action: pick {want} (Civil / E&M list is automatic)")
     try:
-        for i in range(page.locator("select").count()):
-            sel = page.locator("select").nth(i)
-            opts = [o.strip() for o in sel.locator("option").all_text_contents() if (o or "").strip()]
-            hit = next(
-                (
-                    o
-                    for o in opts
-                    if (
-                        want == "return"
-                        and re.search(r"return", o, re.I)
-                        and not re.search(r"select one", o, re.I)
-                    )
-                    or (want == "forward" and re.search(r"forward", o, re.I))
-                ),
-                None,
-            )
-            if hit:
-                sel.select_option(label=hit)
-                page.wait_for_timeout(500)
-                log(f"  Action native select → {hit}")
-                return True
+        page.evaluate(
+            """() => {
+                const n = [...document.querySelectorAll('label,div,span,p,strong,b')].find(e =>
+                    /^(Action:?)$/i.test((e.innerText || '').replace(/\\s+/g,' ').trim())
+                    && (e.innerText || '').trim().length < 12
+                );
+                if (n) n.scrollIntoView({block: 'center'});
+            }"""
+        )
     except Exception:
         pass
+    page.wait_for_timeout(300)
+
     opened = page.evaluate(
         """() => {
             const norm = t => (t || '').replace(/\\s+/g, ' ').trim();
-            const cands = [...document.querySelectorAll(
-                'div, span, input, select, [role="combobox"], mat-select, ng-select, .ng-select'
-            )].filter(e => {
-                const r = e.getBoundingClientRect();
-                const t = norm(e.innerText || e.value || e.placeholder || '');
-                return r.width > 120 && r.height > 20 && r.height < 90 && /select one/i.test(t);
-            });
-            cands.sort((a, b) => b.getBoundingClientRect().y - a.getBoundingClientRect().y);
-            if (!cands.length) return {ok: false};
-            cands[0].click();
-            return {ok: true, text: norm(cands[0].innerText || '')};
-        }"""
-    )
-    log(f"  Action dropdown open: {opened}")
-    page.wait_for_timeout(450)
-    picked = page.evaluate(
-        """(want) => {
-            const norm = t => (t || '').replace(/\\s+/g, ' ').trim();
-            const nodes = [...document.querySelectorAll(
-                'li, option, mat-option, .ng-option, [role="option"], div, span, a'
-            )];
-            const items = nodes.filter(e => {
+            const labs = [...document.querySelectorAll('label,div,span,p,strong,b')].filter(e => {
                 const t = norm(e.innerText);
                 const r = e.getBoundingClientRect();
-                if (!r.width || !r.height || r.height > 60) return false;
-                if (t.length < 8 || t.length > 90) return false;
-                if (/select one|save as draft|generate otp|attach digital|upload/i.test(t)) return false;
-                if (want === 'return') return /return\\s+to/i.test(t);
-                return /forward\\s+to/i.test(t);
+                return r.width && r.height && r.height < 40 && /^(Action:?)$/i.test(t);
             });
-            items.sort((a, b) => norm(a.innerText).length - norm(b.innerText).length);
-            if (!items.length) {
-                return {ok: false, visible: nodes.filter(e => {
-                    const r = e.getBoundingClientRect();
-                    return r.width && r.height && r.height < 50;
-                }).slice(0, 12).map(e => norm(e.innerText)).filter(Boolean)};
+            const lab = labs[labs.length - 1];
+            const ly = lab ? lab.getBoundingClientRect().bottom : 0;
+            if (lab) lab.scrollIntoView({block: 'center'});
+            const hits = [...document.querySelectorAll(
+                'ng-select, .ng-select, .ng-select-container, [role="combobox"], mat-select, select, input, div, span'
+            )].filter(e => {
+                const r = e.getBoundingClientRect();
+                if (r.width < 180 || r.height < 22 || r.height > 80) return false;
+                if (lab && (r.y < ly - 8 || r.y > ly + 90)) return false;
+                const t = norm(e.innerText || e.placeholder || e.value || '');
+                const tag = (e.tagName || '').toLowerCase();
+                return /select one/i.test(t) || tag === 'ng-select' || (e.getAttribute('role') || '') === 'combobox';
+            });
+            hits.sort((a, b) => b.getBoundingClientRect().width - a.getBoundingClientRect().width);
+            if (!hits.length) {
+                return {ok: false, ly, nlab: labs.length};
             }
-            const t = norm(items[0].innerText);
-            items[0].click();
-            return {ok: true, picked: t};
-        }""",
-        want,
+            const el = hits[0];
+            el.click();
+            const r = el.getBoundingClientRect();
+            return {ok: true, tag: el.tagName, cls: (el.className || '').toString().slice(0, 80),
+                    t: norm(el.innerText || el.placeholder || ''), y: Math.round(r.y), w: Math.round(r.width)};
+        }"""
     )
-    log(f"  Action option: {picked}")
-    if not picked or not picked.get("ok"):
+    log(f"  Action box click: {opened}")
+
+    if not opened or not opened.get("ok"):
+        # Playwright fallback: last visible "Select One" (Action is below remark)
+        clicked = False
+        for loc in (
+            page.locator("ng-select").last,
+            page.get_by_role("combobox").last,
+            page.get_by_text("Select One", exact=True).last,
+            page.locator("xpath=//*[normalize-space()='Action:' or normalize-space()='Action']/following::*[contains(normalize-space(.),'Select One')][1]"),
+        ):
+            try:
+                if loc.count():
+                    loc.first.scroll_into_view_if_needed()
+                    loc.first.click(timeout=2500)
+                    clicked = True
+                    log(f"  Action opened via locator")
+                    break
+            except Exception:
+                continue
+        if not clicked:
+            save_debug(page, "action_select_fail")
+            return False
+    page.wait_for_timeout(500)
+
+    opt_re = r"Return\s+To\s+AE" if want == "return" else r"Forward\s+To"
+    picked_txt = ""
+    try:
+        opt = page.get_by_text(re.compile(opt_re, re.I))
+        n = opt.count()
+        log(f"  overlay matches {n} for /{opt_re}/")
+        if n:
+            opt.last.click(timeout=5000)
+            picked_txt = opt.last.inner_text(timeout=2000)
+    except Exception as exc:
+        log(f"  overlay click: {exc}")
+    if not picked_txt:
+        picked = page.evaluate(
+            """(want) => {
+                const norm = t => (t || '').replace(/\\s+/g, ' ').trim();
+                const items = [...document.querySelectorAll(
+                    '.ng-option, mat-option, [role="option"], li, div, span'
+                )].filter(e => {
+                    const t = norm(e.innerText);
+                    const r = e.getBoundingClientRect();
+                    if (!r.width || !r.height || r.height > 48) return false;
+                    if (t.length < 8 || t.length > 90) return false;
+                    if (/select one|save as draft|generate otp|attach digital/i.test(t)) return false;
+                    return want === 'return' ? /return\\s+to/i.test(t) : /forward\\s+to/i.test(t);
+                });
+                items.sort((a, b) => norm(a.innerText).length - norm(b.innerText).length);
+                if (!items.length) return {ok: false};
+                items[0].click();
+                return {ok: true, picked: norm(items[0].innerText)};
+            }""",
+            want,
+        )
+        log(f"  Action option js: {picked}")
+        if picked and picked.get("ok"):
+            picked_txt = picked.get("picked") or "ok"
+    if not picked_txt:
         save_debug(page, "action_select_fail")
         return False
-    page.wait_for_timeout(700)
-    return True
+    log(f"  Action selected → {picked_txt}")
+    page.wait_for_timeout(600)
+    if _wait_button(page, r"generate otp", 8000):
+        log("  GENERATE OTP appeared")
+        return True
+    log("  GENERATE OTP not visible after Action pick")
+    save_debug(page, "action_no_otp_btn")
+    return False
 
 
 def _wait_button(page, pattern: str, ms: int = 8000) -> bool:
