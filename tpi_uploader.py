@@ -338,7 +338,7 @@ def fill_tpi_fields(page, fill: dict) -> None:
 
 
 def click_modal_ok(page, wait_ms: int = 8000) -> str:
-    """Success! Data save successfully!!  /  Please Enter TPI Number — click OK."""
+    """OK on Success / OTP sent / Are you sure want to return|forward."""
     page.wait_for_timeout(400)
     for _ in range(max(1, wait_ms // 250)):
         info = page.evaluate(
@@ -346,17 +346,18 @@ def click_modal_ok(page, wait_ms: int = 8000) -> str:
                 const body = (document.body && document.body.innerText) || '';
                 const vis = [...document.querySelectorAll('button, .btn, a')].filter(b => {
                     const r = b.getBoundingClientRect();
-                    return r.width && r.height && /^\s*OK\s*$/i.test((b.innerText || '').trim());
+                    const t = (b.innerText || '').trim();
+                    return r.width && r.height && /^OK$/i.test(t);
                 });
                 const hit = vis.find(b => {
                     const box = b.closest('.modal, .swal2-popup, [class*="modal"], [class*="alert"], [role="dialog"]') || b.parentElement;
                     const t = (box && box.innerText) || body;
-                    return /success|data save successfully|please enter|tpi number/i.test(t);
+                    return /success|data save successfully|please enter|tpi number|otp has been sent|are you sure|want to return|want to forward|press ok/i.test(t);
                 }) || vis[0];
-                if (!hit) return {ok: false, body: body.slice(0, 120)};
+                if (!hit) return {ok: false};
                 const msg = (hit.closest('.modal, .swal2-popup, [class*="modal"], [role="dialog"]') || hit.parentElement).innerText || '';
                 hit.click();
-                return {ok: true, msg: msg.replace(/\\s+/g, ' ').trim().slice(0, 120)};
+                return {ok: true, msg: msg.replace(/\\s+/g, ' ').trim().slice(0, 160)};
             }"""
         )
         if info and info.get("ok"):
@@ -457,37 +458,119 @@ def click_attach_signature(page) -> bool:
 
 
 def select_action(page, btype: str) -> bool:
-    want = "Return To AE" if btype == "return" else "Forward To Action by Engineer"
-    log(f"  Action dropdown → {want}")
+    """Portal shows Civil or E&M options itself. We only pick Forward vs Return."""
+    want = "return" if btype == "return" else "forward"
+    log(f"  Action: pick {want} (Civil / E&M list is automatic)")
     try:
         for i in range(page.locator("select").count()):
             sel = page.locator("select").nth(i)
-            opts = sel.locator("option").all_text_contents()
-            hit = next((o for o in opts if want.lower() in (o or "").lower()), None)
+            opts = [o.strip() for o in sel.locator("option").all_text_contents() if (o or "").strip()]
+            hit = next(
+                (
+                    o
+                    for o in opts
+                    if (
+                        want == "return"
+                        and re.search(r"return", o, re.I)
+                        and not re.search(r"select one", o, re.I)
+                    )
+                    or (want == "forward" and re.search(r"forward", o, re.I))
+                ),
+                None,
+            )
             if hit:
                 sel.select_option(label=hit)
-                page.wait_for_timeout(400)
+                page.wait_for_timeout(500)
+                log(f"  Action native select → {hit}")
                 return True
     except Exception:
         pass
-    try:
-        page.get_by_text(re.compile(r"Select One", re.I)).last.click(timeout=4000)
-        page.wait_for_timeout(300)
-        page.get_by_text(re.compile(want, re.I)).last.click(timeout=4000)
-        page.wait_for_timeout(400)
-        log("  action picked from list")
-        return True
-    except Exception as exc:
-        log(f"  action select: {exc}")
+    opened = page.evaluate(
+        """() => {
+            const norm = t => (t || '').replace(/\\s+/g, ' ').trim();
+            const cands = [...document.querySelectorAll(
+                'div, span, input, select, [role="combobox"], mat-select, ng-select, .ng-select'
+            )].filter(e => {
+                const r = e.getBoundingClientRect();
+                const t = norm(e.innerText || e.value || e.placeholder || '');
+                return r.width > 120 && r.height > 20 && r.height < 90 && /select one/i.test(t);
+            });
+            cands.sort((a, b) => b.getBoundingClientRect().y - a.getBoundingClientRect().y);
+            if (!cands.length) return {ok: false};
+            cands[0].click();
+            return {ok: true, text: norm(cands[0].innerText || '')};
+        }"""
+    )
+    log(f"  Action dropdown open: {opened}")
+    page.wait_for_timeout(450)
+    picked = page.evaluate(
+        """(want) => {
+            const norm = t => (t || '').replace(/\\s+/g, ' ').trim();
+            const nodes = [...document.querySelectorAll(
+                'li, option, mat-option, .ng-option, [role="option"], div, span, a'
+            )];
+            const items = nodes.filter(e => {
+                const t = norm(e.innerText);
+                const r = e.getBoundingClientRect();
+                if (!r.width || !r.height || r.height > 60) return false;
+                if (t.length < 8 || t.length > 90) return false;
+                if (/select one|save as draft|generate otp|attach digital|upload/i.test(t)) return false;
+                if (want === 'return') return /return\\s+to/i.test(t);
+                return /forward\\s+to/i.test(t);
+            });
+            items.sort((a, b) => norm(a.innerText).length - norm(b.innerText).length);
+            if (!items.length) {
+                return {ok: false, visible: nodes.filter(e => {
+                    const r = e.getBoundingClientRect();
+                    return r.width && r.height && r.height < 50;
+                }).slice(0, 12).map(e => norm(e.innerText)).filter(Boolean)};
+            }
+            const t = norm(items[0].innerText);
+            items[0].click();
+            return {ok: true, picked: t};
+        }""",
+        want,
+    )
+    log(f"  Action option: {picked}")
+    if not picked or not picked.get("ok"):
         save_debug(page, "action_select_fail")
         return False
+    page.wait_for_timeout(700)
+    return True
+
+
+def _wait_button(page, pattern: str, ms: int = 8000) -> bool:
+    deadline = datetime.now().timestamp() + ms / 1000
+    rx = re.compile(pattern, re.I)
+    while datetime.now().timestamp() < deadline:
+        try:
+            if page.get_by_role("button", name=rx).count():
+                return True
+        except Exception:
+            pass
+        found = page.evaluate(
+            """(pat) => {
+                const re = new RegExp(pat, 'i');
+                return [...document.querySelectorAll('button, a.btn, .btn')].some(b => {
+                    const r = b.getBoundingClientRect();
+                    return r.width && r.height && re.test((b.innerText || '').trim());
+                });
+            }""",
+            pattern,
+        )
+        if found:
+            return True
+        page.wait_for_timeout(200)
+    return False
 
 
 def generate_otp_and_submit(page, btype: str) -> bool:
-    btn = page.get_by_role("button", name=re.compile("generate otp", re.I))
-    if btn.count() == 0:
-        btn = page.get_by_text(re.compile("generate otp", re.I))
+    if not _wait_button(page, r"generate otp", 10000):
+        log("  GENERATE OTP button not visible yet")
+        save_debug(page, "no_generate_otp")
+        return False
     try:
+        btn = page.get_by_role("button", name=re.compile("generate otp", re.I))
         if btn.count():
             btn.first.click(timeout=8000)
         else:
@@ -503,13 +586,14 @@ def generate_otp_and_submit(page, btype: str) -> bool:
     except Exception as exc:
         log(f"  GENERATE OTP: {exc}")
         return False
-    page.wait_for_timeout(800)
-    click_modal_ok(page, wait_ms=10000)  # 6 digit OTP has been sent...
+    page.wait_for_timeout(600)
+    click_modal_ok(page, wait_ms=12000)
+    page.wait_for_timeout(400)
     otp = page.get_by_placeholder(re.compile("otp", re.I))
     if otp.count() == 0:
         otp = page.locator("xpath=//*[contains(normalize-space(.),'Please Enter OTP')][1]/following::input[1]")
     if otp.count() == 0:
-        otp = page.locator("input[name*='otp' i], input[id*='otp' i]")
+        otp = page.locator("input[name*='otp' i], input[id*='otp' i], input[placeholder*='OTP' i]")
     if otp.count():
         _type_into(page, otp.first, "000000")
         log("  OTP typed 000000")
@@ -518,35 +602,48 @@ def generate_otp_and_submit(page, btype: str) -> bool:
         save_debug(page, "otp_missing")
         return False
     page.wait_for_timeout(500)
-    if btype == "return":
-        name = r"RETURN TO AE"
-    else:
-        name = r"FORWARD TO ACTION BY EXECUTIVE ENGINEER"
-    go = page.get_by_role("button", name=re.compile(name, re.I))
-    if go.count() == 0:
-        go = page.get_by_text(re.compile(name, re.I))
-    try:
-        if go.count():
-            go.first.click(timeout=8000)
-        else:
-            page.evaluate(
-                """(name) => {
-                    const re = new RegExp(name, 'i');
-                    const b = [...document.querySelectorAll('button,a,.btn')].find(e =>
-                        re.test(e.innerText || '')
-                    );
-                    if (b) b.click();
-                }""",
-                name,
-            )
-        log(f"  clicked {name}")
-        page.wait_for_timeout(1000)
-        click_modal_ok(page, wait_ms=8000)
-        return True
-    except Exception as exc:
-        log(f"  final action: {exc}")
+    btn_pat = r"return to" if btype == "return" else r"forward to"
+    if not _wait_button(page, btn_pat, 8000):
+        log(f"  final {btype} button not found")
+        save_debug(page, "final_action_missing")
+        return False
+    clicked = page.evaluate(
+        """(want) => {
+            const btns = [...document.querySelectorAll('button, a.btn, .btn')].filter(b => {
+                const t = (b.innerText || '').replace(/\\s+/g, ' ').trim();
+                const r = b.getBoundingClientRect();
+                if (!r.width || !r.height) return false;
+                if (/save as draft|generate otp|attach digital|upload|select one/i.test(t)) return false;
+                if (want === 'return') return /return\\s+to/i.test(t);
+                return /forward\\s+to/i.test(t);
+            });
+            if (!btns.length) return {ok: false};
+            const t = (btns[0].innerText || '').replace(/\\s+/g, ' ').trim();
+            btns[0].click();
+            return {ok: true, text: t};
+        }""",
+        "return" if btype == "return" else "forward",
+    )
+    log(f"  clicked final action: {clicked}")
+    if not clicked or not clicked.get("ok"):
         save_debug(page, "final_action_fail")
         return False
+    page.wait_for_timeout(600)
+    click_modal_ok(page, wait_ms=8000)
+    try:
+        page.wait_for_url(re.compile(r"/success/"), timeout=20000)
+        log(f"  success page: {page.url}")
+    except Exception:
+        log(f"  waiting success page — now {page.url}")
+        click_modal_ok(page, wait_ms=3000)
+        try:
+            page.wait_for_url(re.compile(r"/success/"), timeout=10000)
+            log(f"  success page: {page.url}")
+        except Exception:
+            save_debug(page, "no_success_page")
+            return False
+    page.wait_for_timeout(400)
+    return True
 
 
 def load_batch(folder: Path) -> list[dict]:
@@ -723,14 +820,18 @@ def main() -> None:
                     elif "dsc" in steps:
                         log("  Return bill — skip DSC")
                     if "action" in steps:
-                        select_action(detail, btype)
-                        generate_otp_and_submit(detail, btype)
+                        if select_action(detail, btype):
+                            ok_act = generate_otp_and_submit(detail, btype)
+                        else:
+                            ok_act = False
+                            log("  skip OTP — action not selected")
                         try:
                             batch = Path(b.get("path") or os.getenv("TPI_BATCH") or ".")
                             tag = "Return" if btype == "return" else "Forward"
-                            fn = f"{b.get('scheme_id')}_{win_name(b.get('mb_no') or '', 20)}_{tag}_{datetime.now().strftime('%H%M%S')}.png"
+                            st = "OK" if ok_act else "FAIL"
+                            fn = f"{b.get('scheme_id')}_{win_name(b.get('mb_no') or '', 20)}_{tag}_{st}_{datetime.now().strftime('%H%M%S')}.png"
                             dest = batch / fn
-                            detail.screenshot(path=str(dest))
+                            detail.screenshot(path=str(dest), full_page=True)
                             log(f"  screenshot saved: {dest.name}")
                         except Exception as exc:
                             log(f"  screenshot: {exc}")
