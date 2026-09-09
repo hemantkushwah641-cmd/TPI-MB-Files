@@ -483,38 +483,51 @@ def settle_detail(page) -> None:
     except Exception:
         pass
     try:
-        page.wait_for_load_state("load", timeout=8000)
-    except Exception:
-        pass
-    try:
         dismiss_popups(page)
     except Exception:
         pass
-    page.wait_for_timeout(800)
+    page.wait_for_timeout(600)
+
+
+def _scroll_action_into_view(page) -> None:
     try:
-        page.keyboard.press("End")
+        page.locator("xpath=//*[normalize-space()='Action:' or normalize-space()='Action']").last.scroll_into_view_if_needed()
     except Exception:
-        pass
-    page.wait_for_timeout(300)
+        try:
+            page.get_by_text("Select One", exact=True).last.scroll_into_view_if_needed()
+        except Exception:
+            pass
+    page.wait_for_timeout(250)
 
 
 def _click_select_one(page) -> bool:
-    for attempt in range(6):
-        try:
-            box = page.get_by_text("Select One", exact=True).last
-            box.scroll_into_view_if_needed()
-            box.click(timeout=4000)
-            log("  clicked Select One")
-            return True
-        except Exception as exc:
-            s = str(exc).lower()
-            log(f"  Select One retry {attempt + 1}: {str(exc)[:160]}")
-            if "destroyed" in s or "navigation" in s:
-                try:
-                    page.wait_for_load_state("domcontentloaded", timeout=8000)
-                except Exception:
-                    pass
-            page.wait_for_timeout(700)
+    _scroll_action_into_view(page)
+    locators = (
+        page.locator("xpath=//*[normalize-space()='Action:' or normalize-space()='Action']/following::*[contains(normalize-space(.),'Select One')][1]"),
+        page.get_by_text("Select One", exact=True).last,
+        page.locator("ng-select, .ng-select, [role='combobox']").last,
+    )
+    for attempt in range(5):
+        for loc in locators:
+            try:
+                if not loc.count():
+                    continue
+                loc.first.scroll_into_view_if_needed()
+                loc.first.click(timeout=3500)
+                log("  clicked Select One (Action box)")
+                return True
+            except Exception as exc:
+                s = str(exc).lower()
+                if "destroyed" in s or "navigation" in s:
+                    try:
+                        page.wait_for_load_state("domcontentloaded", timeout=8000)
+                    except Exception:
+                        pass
+                    page.wait_for_timeout(600)
+                    break
+                continue
+        page.wait_for_timeout(400)
+    log("  Select One not clickable")
     return False
 
 
@@ -547,43 +560,76 @@ def _native_action_select(page, want: str) -> str:
                 pass
             log(f"  native Action select -> {hit}")
             return hit
-        except Exception as exc:
-            log(f"  native select {i}: {exc}")
+        except Exception:
+            continue
     return ""
 
 
 def _click_overlay_option(page, want: str) -> bool:
+    """Click Return/Forward inside the dropdown panel (even if it opens on the left)."""
     pat = r"Return To AE" if want == "return" else r"Forward To"
-    page.wait_for_timeout(400)
+    page.wait_for_timeout(500)
     try:
-        loc = page.locator(".ng-option, mat-option, [role='option'], .dropdown-item, li")
-        hit = loc.filter(has_text=re.compile(pat, re.I))
-        if hit.count():
-            hit.first.click(timeout=4000)
-            log(f"  overlay option clicked ({pat})")
+        dump = page.evaluate(
+            """() => {
+                const panels = [...document.querySelectorAll(
+                    '.cdk-overlay-pane, .ng-dropdown-panel, .ng-dropdown-panel-items, .dropdown-menu, .p-dropdown-items, [class*="overlay-pane"], [class*="dropdown-panel"]'
+                )];
+                return panels.slice(0, 6).map(p => {
+                    const r = p.getBoundingClientRect();
+                    return {cls: (p.className || '').toString().slice(0, 80),
+                            t: (p.innerText || '').replace(/\\s+/g, ' ').trim().slice(0, 180),
+                            x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height)};
+                });
+            }"""
+        )
+        log(f"  overlay panels: {dump}")
+    except Exception as exc:
+        log(f"  overlay dump: {exc}")
+    panel = page.locator(
+        ".cdk-overlay-pane, .ng-dropdown-panel, .ng-dropdown-panel-items, .dropdown-menu.show, .p-dropdown-items, [class*='overlay-pane']"
+    )
+    try:
+        if panel.count():
+            hit = panel.last.get_by_text(re.compile(pat, re.I))
+            if hit.count():
+                hit.last.click(timeout=4000, force=True)
+                log(f"  overlay panel option force-clicked ({pat})")
+                return True
+    except Exception as exc:
+        log(f"  overlay panel click: {exc}")
+    try:
+        info = page.evaluate(
+            """(want) => {
+                const norm = t => (t || '').replace(/\\s+/g, ' ').trim();
+                const re = want === 'return' ? /return\\s+to\\s+ae/i : /forward\\s+to/i;
+                const panels = [...document.querySelectorAll(
+                    '.cdk-overlay-pane, .ng-dropdown-panel, .ng-dropdown-panel-items, .dropdown-menu, .p-dropdown-items, [class*="overlay-pane"], [class*="dropdown-panel"]'
+                )];
+                const roots = panels.length ? panels : [document.body];
+                const hits = [];
+                for (const root of roots) {
+                    for (const e of root.querySelectorAll('div, span, li, a, p, option')) {
+                        if (e.tagName === 'BUTTON' || e.closest('button')) continue;
+                        const t = norm(e.innerText);
+                        if (!re.test(t) || t.length > 90 || t.length < 8) continue;
+                        const r = e.getBoundingClientRect();
+                        if (r.width < 40 || r.height < 12 || r.height > 56) continue;
+                        hits.push({t, x: r.x + r.width / 2, y: r.y + r.height / 2, h: r.height, w: r.width});
+                    }
+                }
+                hits.sort((a, b) => a.t.length - b.t.length);
+                return hits[0] || null;
+            }""",
+            want,
+        )
+        log(f"  overlay hit: {info}")
+        if info and info.get("x") is not None:
+            page.mouse.click(float(info["x"]), float(info["y"]))
+            log(f"  mouse overlay -> {info.get('t')}")
             return True
     except Exception as exc:
-        log(f"  overlay locator: {exc}")
-    try:
-        nodes = page.get_by_text(re.compile(pat, re.I))
-        for i in range(nodes.count()):
-            el = nodes.nth(i)
-            try:
-                if not el.is_visible():
-                    continue
-                box = el.bounding_box()
-                if not box or box["height"] < 14 or box["height"] > 52:
-                    continue
-                cls = (el.get_attribute("class") or "") + " " + (el.get_attribute("type") or "")
-                if re.search(r"\bbtn\b|btn-danger", cls, re.I):
-                    continue
-                page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
-                log(f"  mouse option i={i} h={int(box['height'])}")
-                return True
-            except Exception:
-                continue
-    except Exception as exc:
-        log(f"  overlay mouse: {exc}")
+        log(f"  overlay js: {exc}")
     return False
 
 
@@ -595,6 +641,10 @@ def select_action(page, btype: str) -> bool:
     for attempt in range(4):
         try:
             settle_detail(page)
+            if _wait_button(page, r"generate otp", 1500):
+                log("  GENERATE OTP already visible - Action already selected")
+                return True
+            _scroll_action_into_view(page)
             if _native_action_select(page, want):
                 if _wait_button(page, r"generate otp", 8000):
                     log("  GENERATE OTP appeared")
@@ -602,7 +652,7 @@ def select_action(page, btype: str) -> bool:
             if not _click_select_one(page):
                 last = "Select One not clickable"
                 continue
-            page.wait_for_timeout(400)
+            page.wait_for_timeout(500)
             if not _click_overlay_option(page, want):
                 last = "overlay option not clicked"
                 save_debug(page, "action_overlay_fail")
