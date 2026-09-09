@@ -686,29 +686,34 @@ def _otp_field_visible(page) -> bool:
 
 
 def _pick_from_open_list(page, want: str) -> bool:
-    """ng-select: type Return/Forward then Enter (works even if list opens over OTP)."""
-    word = "Return" if want == "return" else "Forward"
+    """Click Return / Forward in the open Action list. No keyboard typing."""
+    pat = r"Return To AE" if want == "return" else r"Forward To"
+    page.wait_for_timeout(400)
     try:
-        page.keyboard.type(word, delay=50)
-        page.wait_for_timeout(250)
-        page.keyboard.press("Enter")
-        log(f"  keyboard typed '{word}' + Enter")
-        page.wait_for_timeout(400)
-        return True
+        nodes = page.locator("div, li, span, a, p").filter(has_text=re.compile(pat, re.I))
+        n = nodes.count()
+        log(f"  list rows={n} for /{pat}/")
+        for i in range(n):
+            el = nodes.nth(i)
+            try:
+                if not el.is_visible():
+                    continue
+                box = el.bounding_box()
+                if not box or box["height"] < 16 or box["height"] > 50 or box["width"] < 80:
+                    continue
+                cls = (el.get_attribute("class") or "") + " "
+                if re.search(r"\bbtn\b|btn-danger", cls, re.I):
+                    continue
+                el.click(timeout=3000, force=True)
+                log(f"  clicked list option i={i} h={int(box['height'])} w={int(box['width'])}")
+                page.wait_for_timeout(400)
+                return True
+            except Exception as exc:
+                log(f"  list click i={i}: {str(exc)[:120]}")
+                continue
     except Exception as exc:
-        log(f"  keyboard type: {exc}")
-    try:
-        downs = 2 if want == "return" else 1
-        for _ in range(downs):
-            page.keyboard.press("ArrowDown")
-            page.wait_for_timeout(150)
-        page.keyboard.press("Enter")
-        log(f"  keyboard ArrowDown x{downs} + Enter")
-        page.wait_for_timeout(400)
-        return True
-    except Exception as exc:
-        log(f"  keyboard arrows: {exc}")
-    return False
+        log(f"  list scan: {exc}")
+    return _click_overlay_option(page, want)
 
 
 def select_action(page, btype: str) -> bool:
@@ -744,9 +749,10 @@ def select_action(page, btype: str) -> bool:
                 last = "Select One not clickable"
                 continue
             page.wait_for_timeout(400)
-            _pick_from_open_list(page, want)
-            if not (_wait_button(page, r"generate otp", 2500) or _otp_field_visible(page)):
-                _click_overlay_option(page, want)
+            if not _pick_from_open_list(page, want):
+                last = "list option not selected"
+                save_debug(page, "action_overlay_fail")
+                continue
             page.wait_for_timeout(500)
             if _wait_button(page, r"generate otp", 8000) or _otp_field_visible(page):
                 log("  GENERATE OTP / OTP field appeared")
