@@ -466,224 +466,162 @@ def click_attach_signature(page) -> bool:
         return False
 
 
-def wait_page_ready(page) -> None:
-    for state, ms in (("domcontentloaded", 8000), ("load", 8000), ("networkidle", 4000)):
+def settle_detail(page) -> None:
+    """Wait until Save Draft reload finishes and the bill page is usable."""
+    log("  waiting for bill page after Save Draft...")
+    for _ in range(6):
         try:
-            page.wait_for_load_state(state, timeout=ms)
-        except Exception:
-            pass
+            page.wait_for_load_state("domcontentloaded", timeout=4000)
+            break
+        except Exception as exc:
+            if "destroyed" in str(exc).lower() or "navigation" in str(exc).lower():
+                page.wait_for_timeout(600)
+                continue
+            break
+    try:
+        page.wait_for_url(re.compile(r"third-party-inspection/record"), timeout=12000)
+    except Exception:
+        pass
+    try:
+        page.wait_for_load_state("load", timeout=8000)
+    except Exception:
+        pass
     try:
         dismiss_popups(page)
     except Exception:
         pass
-    page.wait_for_timeout(500)
+    page.wait_for_timeout(800)
+    try:
+        page.keyboard.press("End")
+    except Exception:
+        pass
+    page.wait_for_timeout(300)
 
 
-def wait_select_one(page, ms: int = 15000) -> bool:
-    """Save Draft ke baad Action > Select One visible hone tak wait."""
-    deadline = datetime.now().timestamp() + ms / 1000
-    while datetime.now().timestamp() < deadline:
+def _click_select_one(page) -> bool:
+    for attempt in range(6):
         try:
-            loc = page.get_by_text("Select One", exact=True)
-            if loc.count():
-                loc.last.scroll_into_view_if_needed()
-                if loc.last.is_visible():
-                    log("  Select One is visible")
-                    return True
+            box = page.get_by_text("Select One", exact=True).last
+            box.scroll_into_view_if_needed()
+            box.click(timeout=4000)
+            log("  clicked Select One")
+            return True
         except Exception as exc:
             s = str(exc).lower()
-            if "execution context" in s or "navigation" in s or "destroyed" in s:
-                try:
-                    page.wait_for_load_state("domcontentloaded", timeout=5000)
-                except Exception:
-                    pass
-            page.wait_for_timeout(400)
-            continue
-        page.wait_for_timeout(250)
-    log("  Select One not visible yet")
-    return False
-
-
-def safe_evaluate(page, script, arg=None, retries: int = 5):
-    last = None
-    for i in range(retries):
-        try:
-            return page.evaluate(script) if arg is None else page.evaluate(script, arg)
-        except Exception as exc:
-            last = exc
-            s = str(exc).lower()
-            if "execution context" in s or "navigation" in s or "destroyed" in s or "target closed" in s:
-                log(f"  page still loading, retry evaluate ({i + 1})")
+            log(f"  Select One retry {attempt + 1}: {str(exc)[:160]}")
+            if "destroyed" in s or "navigation" in s:
                 try:
                     page.wait_for_load_state("domcontentloaded", timeout=8000)
                 except Exception:
                     pass
-                page.wait_for_timeout(700)
-                continue
-            raise
-    log(f"  evaluate failed: {last}")
-    return None
+            page.wait_for_timeout(700)
+    return False
 
 
-def select_action(page, btype: str) -> bool:
-    """Click the Select One box under Action:, then Return or Forward in the list."""
-    want = "return" if btype == "return" else "forward"
-    log(f"  Action: pick {want}")
-    wait_page_ready(page)
-    wait_select_one(page)
-    loc = safe_evaluate(
-        page,
-        """() => {
-            const norm = t => (t || '').replace(/\\s+/g, ' ').trim();
-            const labs = [...document.querySelectorAll('label,div,span,p,strong')].filter(e => {
-                const t = norm(e.innerText);
-                const r = e.getBoundingClientRect();
-                return (t === 'Action:' || t === 'Action') && r.height > 0 && r.height < 40 && r.width < 220;
-            });
-            labs.sort((a, b) => b.getBoundingClientRect().y - a.getBoundingClientRect().y);
-            const lab = labs[0];
-            if (lab) lab.scrollIntoView({block: 'center'});
-            const lr = lab ? lab.getBoundingClientRect() : {bottom: 0};
-            const actionSelects = [...document.querySelectorAll('select')].map((s, i) => ({
-                i,
-                opts: [...s.options].map(o => (o.text || '').trim()),
-            })).filter(s => s.opts.some(o => /return to|forward to/i.test(o)));
-            const under = [...document.querySelectorAll(
-                'select, ng-select, [role="combobox"], .ng-select, input, div, button'
-            )].find(e => {
-                const r = e.getBoundingClientRect();
-                if (r.width < 180 || r.height < 20 || r.height > 70) return false;
-                if (r.y < lr.bottom - 8 || r.y > lr.bottom + 130) return false;
-                const t = norm(e.innerText || e.value || e.placeholder || '');
-                return /select one/i.test(t) || e.tagName === 'SELECT' || e.tagName === 'NG-SELECT';
-            });
-            if (!under && !actionSelects.length) {
-                return {ok: false, nlab: labs.length, ly: lr.bottom, nsel: actionSelects.length};
-            }
-            const el = under || document.querySelectorAll('select')[actionSelects[0].i];
-            const r = el.getBoundingClientRect();
-            return {
-                ok: true,
-                tag: el.tagName,
-                x: r.x + r.width * 0.5,
-                y: r.y + r.height * 0.5,
-                w: Math.round(r.width),
-                h: Math.round(r.height),
-                opts: el.tagName === 'SELECT' ? [...el.options].map(o => (o.text || '').trim()) : [],
-                selIndex: actionSelects.length ? actionSelects[0].i : -1,
-                t: norm(el.innerText || el.placeholder || ''),
-            };
-        }"""
-    )
-    # JS ternary instead of Python leaked — rewrite loc if broken
-    log(f"  Action control: { {k: loc.get(k) for k in ('ok','tag','w','h','t','opts') if loc} }")
-    if not loc or not loc.get("ok"):
-        # fallback: last native select that has Return/Forward options
-        hit_i = None
-        hit_label = None
+def _native_action_select(page, want: str) -> str:
+    try:
+        n = page.locator("select").count()
+    except Exception:
+        return ""
+    for i in range(n):
         try:
-            n = page.locator("select").count()
-            for i in range(n):
-                opts = [o.strip() for o in page.locator("select").nth(i).locator("option").all_text_contents()]
-                match = next(
-                    (
-                        o
-                        for o in opts
-                        if (want == "return" and re.search(r"return", o, re.I))
-                        or (want == "forward" and re.search(r"forward", o, re.I))
-                    ),
-                    None,
-                )
-                if match:
-                    hit_i, hit_label = i, match
-                    break
-        except Exception as exc:
-            log(f"  select scan: {exc}")
-        if hit_i is not None:
-            sel = page.locator("select").nth(hit_i)
+            sel = page.locator("select").nth(i)
+            opts = [o.strip() for o in sel.locator("option").all_text_contents()]
+            hit = next(
+                (
+                    o
+                    for o in opts
+                    if (want == "return" and re.search(r"return\s+to", o, re.I))
+                    or (want == "forward" and re.search(r"forward\s+to", o, re.I))
+                ),
+                None,
+            )
+            if not hit:
+                continue
             sel.scroll_into_view_if_needed()
-            sel.select_option(label=hit_label)
+            sel.select_option(label=hit)
             try:
                 sel.dispatch_event("change")
                 sel.dispatch_event("input")
             except Exception:
                 pass
-            log(f"  native select -> {hit_label}")
-            page.wait_for_timeout(600)
-            if _wait_button(page, r"generate otp", 8000):
-                log("  GENERATE OTP appeared")
-                return True
-        save_debug(page, "action_select_fail")
-        return False
+            log(f"  native Action select -> {hit}")
+            return hit
+        except Exception as exc:
+            log(f"  native select {i}: {exc}")
+    return ""
 
-    opts = loc.get("opts") or []
-    hit_label = next(
-        (
-            o
-            for o in opts
-            if (want == "return" and re.search(r"return", o, re.I))
-            or (want == "forward" and re.search(r"forward", o, re.I))
-        ),
-        None,
-    )
-    if hit_label:
-        n = page.locator("select").count()
-        for i in range(n):
-            labels = [o.strip() for o in page.locator("select").nth(i).locator("option").all_text_contents()]
-            if hit_label in labels:
-                sel = page.locator("select").nth(i)
-                sel.scroll_into_view_if_needed()
-                sel.select_option(label=hit_label)
-                try:
-                    sel.dispatch_event("change")
-                    sel.dispatch_event("input")
-                except Exception:
-                    pass
-                log(f"  native select -> {hit_label}")
-                page.wait_for_timeout(700)
-                if _wait_button(page, r"generate otp", 10000):
+
+def _click_overlay_option(page, want: str) -> bool:
+    pat = r"Return To AE" if want == "return" else r"Forward To"
+    page.wait_for_timeout(400)
+    try:
+        loc = page.locator(".ng-option, mat-option, [role='option'], .dropdown-item, li")
+        hit = loc.filter(has_text=re.compile(pat, re.I))
+        if hit.count():
+            hit.first.click(timeout=4000)
+            log(f"  overlay option clicked ({pat})")
+            return True
+    except Exception as exc:
+        log(f"  overlay locator: {exc}")
+    try:
+        nodes = page.get_by_text(re.compile(pat, re.I))
+        for i in range(nodes.count()):
+            el = nodes.nth(i)
+            try:
+                if not el.is_visible():
+                    continue
+                box = el.bounding_box()
+                if not box or box["height"] < 14 or box["height"] > 52:
+                    continue
+                cls = (el.get_attribute("class") or "") + " " + (el.get_attribute("type") or "")
+                if re.search(r"\bbtn\b|btn-danger", cls, re.I):
+                    continue
+                page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+                log(f"  mouse option i={i} h={int(box['height'])}")
+                return True
+            except Exception:
+                continue
+    except Exception as exc:
+        log(f"  overlay mouse: {exc}")
+    return False
+
+
+def select_action(page, btype: str) -> bool:
+    """Click Select One under Action, then Return or Forward. Retries if page reloads."""
+    want = "return" if btype == "return" else "forward"
+    log(f"  Action: pick {want}")
+    last = ""
+    for attempt in range(4):
+        try:
+            settle_detail(page)
+            if _native_action_select(page, want):
+                if _wait_button(page, r"generate otp", 8000):
                     log("  GENERATE OTP appeared")
                     return True
-                break
-
-    # Custom dropdown: real mouse click on the Select One box
-    x, y = float(loc["x"]), float(loc["y"])
-    page.mouse.click(x, y)
-    log(f"  mouse click Select One at {int(x)},{int(y)}")
-    page.wait_for_timeout(500)
-    opt = safe_evaluate(
-        page,
-        """(want) => {
-            const norm = t => (t || '').replace(/\\s+/g, ' ').trim();
-            const items = [...document.querySelectorAll('div, span, li, a, p, option')].filter(e => {
-                if ((e.tagName || '') === 'BUTTON' || e.closest('button.btn')) return false;
-                const t = norm(e.innerText);
-                const r = e.getBoundingClientRect();
-                if (r.width < 80 || r.height < 16 || r.height > 48) return false;
-                if (t.length < 10 || t.length > 90) return false;
-                if (/select one|save as draft|generate otp|attach digital/i.test(t)) return false;
-                return want === 'return' ? /^Return To AE/i.test(t) : /^Forward To /i.test(t);
-            });
-            items.sort((a, b) => norm(a.innerText).length - norm(b.innerText).length);
-            if (!items.length) return {ok: false};
-            const r = items[0].getBoundingClientRect();
-            return {ok: true, x: r.x + r.width / 2, y: r.y + r.height / 2, picked: norm(items[0].innerText)};
-        }""",
-        want,
-    )
-    log(f"  overlay: {opt}")
-    if opt and opt.get("ok"):
-        page.mouse.click(float(opt["x"]), float(opt["y"]))
-        log(f"  mouse click option: {opt.get('picked')}")
-    else:
-        save_debug(page, "action_select_fail")
-        return False
-    page.wait_for_timeout(700)
-    if _wait_button(page, r"generate otp", 10000):
-        log("  GENERATE OTP appeared")
-        return True
-    log("  GENERATE OTP not visible after Action pick")
-    save_debug(page, "action_no_otp_btn")
+            if not _click_select_one(page):
+                last = "Select One not clickable"
+                continue
+            page.wait_for_timeout(400)
+            if not _click_overlay_option(page, want):
+                last = "overlay option not clicked"
+                save_debug(page, "action_overlay_fail")
+                continue
+            page.wait_for_timeout(700)
+            if _wait_button(page, r"generate otp", 10000):
+                log("  GENERATE OTP appeared")
+                return True
+            last = "GENERATE OTP not visible"
+            save_debug(page, "action_no_otp_btn")
+        except Exception as exc:
+            last = str(exc)
+            log(f"  Action attempt {attempt + 1} error: {exc}")
+            s = str(exc).lower()
+            if "destroyed" in s or "navigation" in s:
+                page.wait_for_timeout(1000)
+                continue
+    log(f"  Action failed: {last}")
+    save_debug(page, "action_select_fail")
     return False
 
 
@@ -964,18 +902,22 @@ def main() -> None:
                             fill_tpi_fields(detail, fill)
                             saved = click_save_as_draft(detail)
                         log("  waiting for Action box after Save Draft...")
-                        wait_page_ready(detail)
-                        wait_select_one(detail)
+                        settle_detail(detail)
                     if "dsc" in steps and btype == "forward":
                         click_attach_signature(detail)
                     elif "dsc" in steps:
                         log("  Return bill — skip DSC")
+                    ok_act = False
                     if "action" in steps:
-                        if select_action(detail, btype):
-                            ok_act = generate_otp_and_submit(detail, btype)
-                        else:
-                            ok_act = False
-                            log("  skip OTP — action not selected")
+                        try:
+                            settle_detail(detail)
+                            if select_action(detail, btype):
+                                ok_act = generate_otp_and_submit(detail, btype)
+                            else:
+                                log("  skip OTP — action not selected")
+                        except Exception as exc:
+                            log(f"  Action/OTP step: {exc}")
+                            save_debug(detail, "action_step_fail")
                         try:
                             batch = Path(b.get("path") or os.getenv("TPI_BATCH") or ".")
                             tag = "Return" if btype == "return" else "Forward"
