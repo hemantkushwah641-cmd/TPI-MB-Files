@@ -254,8 +254,17 @@ def upload_files_on_detail(page, files: list[str]) -> list[str]:
 def _type_into(page, loc, value: str) -> bool:
     """Angular fields ignore paste — type like a keyboard."""
     value = str(value)
-    loc.scroll_into_view_if_needed(timeout=8000)
-    loc.click(timeout=8000)
+    try:
+        if not loc.is_visible():
+            log("    skip type - field not visible")
+            return False
+    except Exception:
+        pass
+    try:
+        loc.scroll_into_view_if_needed(timeout=3000)
+    except Exception:
+        pass
+    loc.click(timeout=5000)
     page.wait_for_timeout(200)
     loc.press("Control+A")
     page.wait_for_timeout(80)
@@ -655,12 +664,22 @@ def _action_current_text(page) -> str:
 
 
 def _otp_field_visible(page) -> bool:
+    """True only if OTP input/label is actually on screen (not hidden Angular field)."""
     try:
-        if page.get_by_text(re.compile(r"Please Enter OTP", re.I)).count():
-            return True
-        if page.get_by_placeholder(re.compile(r"otp", re.I)).count():
-            loc = page.get_by_placeholder(re.compile(r"otp", re.I)).first
-            return loc.is_visible()
+        loc = page.get_by_placeholder(re.compile(r"otp", re.I))
+        for i in range(loc.count()):
+            el = loc.nth(i)
+            if el.is_visible():
+                box = el.bounding_box()
+                if box and box["width"] > 40 and box["height"] > 10:
+                    return True
+        lab = page.get_by_text(re.compile(r"Please Enter OTP", re.I))
+        for i in range(lab.count()):
+            el = lab.nth(i)
+            if el.is_visible():
+                box = el.bounding_box()
+                if box and box["width"] > 40:
+                    return True
     except Exception:
         pass
     return False
@@ -751,22 +770,30 @@ def _wait_button(page, pattern: str, ms: int = 8000) -> bool:
     rx = re.compile(pattern, re.I)
     while datetime.now().timestamp() < deadline:
         try:
-            if page.get_by_role("button", name=rx).count():
+            btn = page.get_by_role("button", name=rx)
+            for i in range(btn.count()):
+                el = btn.nth(i)
+                if el.is_visible():
+                    box = el.bounding_box()
+                    if box and box["width"] > 20:
+                        return True
+        except Exception:
+            pass
+        try:
+            found = page.evaluate(
+                """(pat) => {
+                    const re = new RegExp(pat, 'i');
+                    return [...document.querySelectorAll('button, a.btn, .btn')].some(b => {
+                        const r = b.getBoundingClientRect();
+                        return r.width > 20 && r.height > 10 && re.test((b.innerText || '').trim());
+                    });
+                }""",
+                pattern,
+            )
+            if found:
                 return True
         except Exception:
             pass
-        found = page.evaluate(
-            """(pat) => {
-                const re = new RegExp(pat, 'i');
-                return [...document.querySelectorAll('button, a.btn, .btn')].some(b => {
-                    const r = b.getBoundingClientRect();
-                    return r.width && r.height && re.test((b.innerText || '').trim());
-                });
-            }""",
-            pattern,
-        )
-        if found:
-            return True
         page.wait_for_timeout(200)
     return False
 
@@ -804,16 +831,29 @@ def generate_otp_and_submit(page, btype: str) -> bool:
     except Exception:
         pass
     page.wait_for_timeout(200)
-    otp = page.get_by_placeholder(re.compile("otp", re.I))
-    if otp.count() == 0:
-        otp = page.locator("xpath=//*[contains(normalize-space(.),'Please Enter OTP')][1]/following::input[1]")
-    if otp.count() == 0:
-        otp = page.locator("input[name*='otp' i], input[id*='otp' i], input[placeholder*='OTP' i]")
-    if otp.count():
-        _type_into(page, otp.first, "000000")
+    otp = None
+    for cand in (
+        page.get_by_placeholder(re.compile("otp", re.I)),
+        page.locator("xpath=//*[contains(normalize-space(.),'Please Enter OTP')]/following::input[1]"),
+        page.locator("input[name*='otp' i], input[id*='otp' i], input[placeholder*='OTP' i]"),
+    ):
+        try:
+            for i in range(cand.count()):
+                el = cand.nth(i)
+                if el.is_visible():
+                    box = el.bounding_box()
+                    if box and box["width"] > 40:
+                        otp = el
+                        break
+        except Exception:
+            continue
+        if otp is not None:
+            break
+    if otp is not None:
+        _type_into(page, otp, "000000")
         log("  OTP typed 000000")
     else:
-        log("  OTP box not found")
+        log("  OTP box not found (visible)")
         save_debug(page, "otp_missing")
         return False
     page.wait_for_timeout(500)
