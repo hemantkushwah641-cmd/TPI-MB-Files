@@ -26,6 +26,13 @@ Hide a module
 Modules / Lock  -> untick Show Download / Upload / Summary -> Save.
 To open a hidden module again: tick Show, enter master password.
 
+Uninstall
+---------
+Double-click UNINSTALL.bat
+Type YES
+Optional: type YES again to also delete saved IDs (.tpidata)
+Then delete this folder.
+
 Do not share
 ------------
 .tpidata  (encrypted accounts + vault)
