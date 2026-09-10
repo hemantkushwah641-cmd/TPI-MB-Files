@@ -13,7 +13,17 @@ from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
-from vault import days_left, master_is_set, protect, session_unlock, set_master, unprotect, verify_master
+from vault import (
+    days_left,
+    master_is_set,
+    protect,
+    seal_setting,
+    session_unlock,
+    set_master,
+    unprotect,
+    unseal_setting,
+    verify_master,
+)
 from usage import daily_summary, load_usage, log_usage, pc_status, whoami
 from version import APP_VERSION
 
@@ -280,6 +290,19 @@ class App(tk.Tk):
             return
         self.accounts = load_accounts()
         try:
+            sealed = unseal_setting("usage_share")
+            if sealed:
+                s = load_settings()
+                if (s.get("usage_share") or "") != sealed:
+                    try:
+                        log_usage("share_tamper", s.get("usage_share") or "")
+                    except Exception:
+                        pass
+                    s["usage_share"] = sealed
+                    save_settings(s)
+        except Exception:
+            pass
+        try:
             me = whoami()
             log_usage("app_open", f"{me['win_user']} on {me['computer']}")
         except Exception:
@@ -304,12 +327,14 @@ class App(tk.Tk):
         self.save_entry = ttk.Entry(pr, textvariable=self.save_var)
         self.save_entry.pack(side="left", fill="x", expand=True)
         ttk.Button(pr, text="Browse…", command=self.pick_save).pack(side="left", padx=6)
-        ttk.Label(pathf, text="Shared usage folder (same OneDrive folder on every PC)").pack(anchor="w", pady=(6, 0))
-        ur = ttk.Frame(pathf)
+        self.usage_block = ttk.Frame(pathf)
+        ttk.Label(self.usage_block, text="Shared usage folder (locked — Master password to change)").pack(anchor="w", pady=(6, 0))
+        ur = ttk.Frame(self.usage_block)
         ur.pack(fill="x")
         self.usage_var = tk.StringVar(value=load_settings().get("usage_share") or "")
-        ttk.Entry(ur, textvariable=self.usage_var).pack(side="left", fill="x", expand=True)
-        ttk.Button(ur, text="Browse…", command=self.pick_usage_share).pack(side="left", padx=6)
+        self.usage_entry = ttk.Entry(ur, textvariable=self.usage_var, state="readonly")
+        self.usage_entry.pack(side="left", fill="x", expand=True)
+        ttk.Button(ur, text="Change…", command=self.pick_usage_share).pack(side="left", padx=6)
 
         body = ttk.Panedwindow(self, orient="horizontal")
         body.pack(fill="both", expand=True, padx=12, pady=(0, 12))
@@ -399,6 +424,7 @@ class App(tk.Tk):
         self.nb.add(tab_sum, text="  3. Summary  ")
         self.nb.add(tab_mst, text="  4. Master  ")
         self.apply_module_tabs()
+        self.apply_role_ui()
 
         ttk.Label(
             tab_dl,
@@ -666,6 +692,7 @@ class App(tk.Tk):
         self.after(600, self.refresh_summary)
         self.after(800, self.refresh_master)
         self.after(15000, self._heartbeat)
+        self.after(700, self._ensure_usage_share)
         if not self.accounts:
             self.after(400, lambda: self.write(
                 "Add at least one ID. Portal passwords are encrypted with the master password.\n"
@@ -700,6 +727,17 @@ class App(tk.Tk):
                     self.nb.select(visible[0])
                 except Exception:
                     pass
+
+    def apply_role_ui(self) -> None:
+        """User PCs cannot see or change the shared usage folder."""
+        try:
+            if is_master():
+                if not self.usage_block.winfo_ismapped():
+                    self.usage_block.pack(fill="x")
+            else:
+                self.usage_block.pack_forget()
+        except Exception:
+            pass
 
     def edit_modules(self) -> None:
         win = tk.Toplevel(self)
@@ -762,6 +800,7 @@ class App(tk.Tk):
                     self.refresh_master()
                 except Exception:
                     pass
+            self.apply_role_ui()
             win.destroy()
 
         ttk.Button(btns, text="Save", style="Green.TButton", command=save).pack(side="right")
@@ -975,6 +1014,22 @@ class App(tk.Tk):
         except Exception:
             pass
         self.after(60000, self._heartbeat)
+
+    def _ensure_usage_share(self) -> None:
+        path = ""
+        try:
+            path = unseal_setting("usage_share") or load_settings().get("usage_share") or ""
+        except Exception:
+            path = load_settings().get("usage_share") or ""
+        if path:
+            return
+        messagebox.showinfo(
+            "Shared folder",
+            "Select the shared OneDrive folder used by all PCs (for example TPI-Usage).\n"
+            "This path is locked. Changing it later needs the master password.",
+            parent=self,
+        )
+        self.pick_usage_share()
 
     def reset_batch(self):
         self.batch_var.set("")
@@ -1250,18 +1305,32 @@ class App(tk.Tk):
             self.refresh_days()
 
     def pick_usage_share(self):
+        if not ask_master_pw(self, "Master password required to set or change the shared usage folder:"):
+            return
         cur = self.usage_var.get().strip() or self.save_var.get().strip() or str(Path.home())
         chosen = filedialog.askdirectory(title="Shared usage folder (same on every PC)", initialdir=cur)
-        if chosen:
-            self.usage_var.set(chosen)
-            s = load_settings()
-            s["usage_share"] = chosen
-            save_settings(s)
-            try:
-                log_usage("usage_share_set", chosen)
-            except Exception:
-                pass
-            self.refresh_summary()
+        if not chosen:
+            return
+        try:
+            seal_setting("usage_share", chosen)
+        except Exception as exc:
+            messagebox.showerror("Lock", f"Could not lock path: {exc}")
+            return
+        self.usage_entry.configure(state="normal")
+        self.usage_var.set(chosen)
+        self.usage_entry.configure(state="readonly")
+        s = load_settings()
+        s["usage_share"] = chosen
+        save_settings(s)
+        try:
+            log_usage("usage_share_set", chosen)
+        except Exception:
+            pass
+        self.refresh_summary()
+        try:
+            self.refresh_master()
+        except Exception:
+            pass
 
     def save_root(self) -> Path | None:
         p = self.save_var.get().strip()
@@ -1517,7 +1586,17 @@ class App(tk.Tk):
             s = load_settings()
             s["gsheet_url"] = self.gsheet_var.get().strip()
             s["master_path"] = self.master_var.get().strip()
-            s["usage_share"] = self.usage_var.get().strip()
+            try:
+                locked = unseal_setting("usage_share")
+            except Exception:
+                locked = ""
+            if locked:
+                s["usage_share"] = locked
+                self.usage_entry.configure(state="normal")
+                self.usage_var.set(locked)
+                self.usage_entry.configure(state="readonly")
+            else:
+                s["usage_share"] = self.usage_var.get().strip()
             save_settings(s)
         except Exception:
             pass
