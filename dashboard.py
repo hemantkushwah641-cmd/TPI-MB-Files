@@ -14,7 +14,7 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
 from vault import days_left, master_is_set, protect, session_unlock, set_master, unprotect, verify_master
-from usage import daily_summary, load_usage, log_usage, whoami
+from usage import daily_summary, load_usage, log_usage, pc_status, whoami
 from version import APP_VERSION
 
 ROOT = Path(__file__).resolve().parent
@@ -174,6 +174,10 @@ def unlock_or_exit(root: tk.Tk) -> bool:
         except Exception:
             messagebox.showerror("Password", "Incorrect password.", parent=root)
     return False
+
+
+def is_master() -> bool:
+    return (load_settings().get("app_role") or "user") == "master"
 
 
 def hidden_modules() -> list[str]:
@@ -385,12 +389,15 @@ class App(tk.Tk):
         self.tab_dl = ttk.Frame(self.nb, padding=10)
         self.tab_up = ttk.Frame(self.nb, padding=10)
         self.tab_sum = ttk.Frame(self.nb, padding=10)
+        self.tab_mst = ttk.Frame(self.nb, padding=10)
         tab_dl = self.tab_dl
         tab_up = self.tab_up
         tab_sum = self.tab_sum
+        tab_mst = self.tab_mst
         self.nb.add(tab_dl, text="  1. Download  ")
         self.nb.add(tab_up, text="  2. Upload  ")
         self.nb.add(tab_sum, text="  3. Summary  ")
+        self.nb.add(tab_mst, text="  4. Master  ")
         self.apply_module_tabs()
 
         ttk.Label(
@@ -582,6 +589,51 @@ class App(tk.Tk):
         self.sum_usage_tot = ttk.Label(tab_sum, text="", style="Hint.TLabel")
         self.sum_usage_tot.pack(anchor="w", pady=(2, 4))
 
+        ttk.Label(
+            tab_mst,
+            text="Master control — all PCs that share the same usage folder. User PCs only send data; this tab stays on your Master PC.",
+            style="Hint.TLabel",
+            wraplength=640,
+        ).pack(anchor="w")
+        mb = ttk.Frame(tab_mst)
+        mb.pack(fill="x", pady=8)
+        ttk.Button(mb, text="  Refresh  ", style="Accent.TButton", command=self.refresh_master).pack(side="left")
+        ttk.Button(mb, text="Open CSV", command=self.open_usage_csv).pack(side="left", padx=6)
+        self.mst_info = ttk.Label(mb, text="", style="Hint.TLabel")
+        self.mst_info.pack(side="left", padx=10)
+
+        ttk.Label(tab_mst, text="PCs / users / version", font=("Segoe UI", 10, "bold")).pack(anchor="w", pady=(4, 2))
+        pcols = ("computer", "user", "ver", "status", "last", "opens", "dl", "up")
+        self.mst_pcs = ttk.Treeview(tab_mst, columns=pcols, show="headings", height=6)
+        for c, t, w in (
+            ("computer", "Computer", 130),
+            ("user", "Windows user", 120),
+            ("ver", "Version", 70),
+            ("status", "Status", 70),
+            ("last", "Last seen", 140),
+            ("opens", "Opens today", 90),
+            ("dl", "Downloads", 80),
+            ("up", "Uploads", 70),
+        ):
+            self.mst_pcs.heading(c, text=t)
+            self.mst_pcs.column(c, width=w)
+        self.mst_pcs.pack(fill="x")
+
+        ttk.Label(tab_mst, text="Activity feed", font=("Segoe UI", 10, "bold")).pack(anchor="w", pady=(10, 2))
+        ecols = ("ts", "computer", "user", "ver", "action", "detail")
+        self.mst_ev = ttk.Treeview(tab_mst, columns=ecols, show="headings", height=8)
+        for c, t, w in (
+            ("ts", "Time", 140),
+            ("computer", "Computer", 120),
+            ("user", "User", 110),
+            ("ver", "Ver", 60),
+            ("action", "Action", 120),
+            ("detail", "Detail", 220),
+        ):
+            self.mst_ev.heading(c, text=t)
+            self.mst_ev.column(c, width=w)
+        self.mst_ev.pack(fill="both", expand=True)
+
         loghead = ttk.Frame(right)
         loghead.pack(fill="x")
         ttk.Label(loghead, text="LOG", font=("Segoe UI", 10, "bold")).pack(side="left")
@@ -612,6 +664,8 @@ class App(tk.Tk):
         self.after(200, self.drain_log)
         self.after(400, self.refresh_upload)
         self.after(600, self.refresh_summary)
+        self.after(800, self.refresh_master)
+        self.after(15000, self._heartbeat)
         if not self.accounts:
             self.after(400, lambda: self.write(
                 "Add at least one ID. Portal passwords are encrypted with the master password.\n"
@@ -620,10 +674,13 @@ class App(tk.Tk):
 
     def apply_module_tabs(self) -> None:
         hidden = set(hidden_modules())
+        if not is_master():
+            hidden.add("master")
         items = [
             ("download", self.tab_dl, "  1. Download  "),
             ("upload", self.tab_up, "  2. Upload  "),
             ("summary", self.tab_sum, "  3. Summary  "),
+            ("master", self.tab_mst, "  4. Master  "),
         ]
         for key, frame, text in items:
             try:
@@ -652,9 +709,10 @@ class App(tk.Tk):
         win.grab_set()
         ttk.Label(
             win,
-            text="Untick a module to hide it. Hidden modules open only after master password.",
+            text="Untick a module to hide it. Hidden modules open only after master password.\n"
+                 "User PCs send activity. Only Master PC shows tab 4 with all details.",
             style="Hint.TLabel",
-            wraplength=420,
+            wraplength=440,
         ).pack(anchor="w", padx=16, pady=(14, 8))
         hidden = set(hidden_modules())
         vars_map: dict[str, tk.BooleanVar] = {}
@@ -662,6 +720,15 @@ class App(tk.Tk):
             v = tk.BooleanVar(value=key not in hidden)
             vars_map[key] = v
             ttk.Checkbutton(win, text=f"Show  {label}", variable=v).pack(anchor="w", padx=20, pady=3)
+        ttk.Separator(win).pack(fill="x", padx=16, pady=10)
+        ttk.Label(win, text="This PC role", font=("Segoe UI", 9, "bold")).pack(anchor="w", padx=16)
+        role = tk.StringVar(value="master" if is_master() else "user")
+        ttk.Radiobutton(win, text="User  —  Download / Upload (give this to other desktops)", variable=role, value="user").pack(
+            anchor="w", padx=20, pady=2
+        )
+        ttk.Radiobutton(win, text="Master — extra tab with every PC / user / version / activity", variable=role, value="master").pack(
+            anchor="w", padx=20, pady=2
+        )
         btns = ttk.Frame(win)
         btns.pack(fill="x", padx=16, pady=14)
 
@@ -669,12 +736,15 @@ class App(tk.Tk):
             old_hidden = set(hidden_modules())
             new_hidden = [k for k, _ in MODULES if not vars_map[k].get()]
             unlocking = [k for k, _ in MODULES if k in old_hidden and k not in new_hidden]
-            if unlocking:
-                names = ", ".join(dict(MODULES)[k] for k in unlocking)
-                if not ask_master_pw(win, f"Enter master password to open: {names}"):
+            new_role = role.get()
+            old_role = "master" if is_master() else "user"
+            if unlocking or new_role != old_role:
+                names = ", ".join(dict(MODULES)[k] for k in unlocking) if unlocking else "role change"
+                if not ask_master_pw(win, f"Enter master password ({names}):"):
                     return
             s = load_settings()
             s["hidden_modules"] = new_hidden
+            s["app_role"] = new_role
             save_settings(s)
             self.apply_module_tabs()
             try:
@@ -683,8 +753,15 @@ class App(tk.Tk):
                 hiding = [k for k in new_hidden if k not in old_hidden]
                 if hiding:
                     log_usage("module_hide", ", ".join(hiding))
+                if new_role != old_role:
+                    log_usage("role", new_role)
             except Exception:
                 pass
+            if new_role == "master":
+                try:
+                    self.refresh_master()
+                except Exception:
+                    pass
             win.destroy()
 
         ttk.Button(btns, text="Save", style="Green.TButton", command=save).pack(side="right")
@@ -827,6 +904,77 @@ class App(tk.Tk):
             )
         except Exception as exc:
             self.sum_usage_tot.config(text=f"Usage log: {exc}")
+
+    def refresh_master(self) -> None:
+        if not hasattr(self, "mst_pcs"):
+            return
+        if not is_master():
+            return
+        for tree in (self.mst_pcs, self.mst_ev):
+            for i in tree.get_children():
+                tree.delete(i)
+        share = self.usage_var.get().strip()
+        ev = load_usage()
+        pcs = pc_status(ev)
+        for r in pcs:
+            self.mst_pcs.insert(
+                "",
+                "end",
+                values=(
+                    r.get("computer"),
+                    r.get("win_user"),
+                    r.get("version"),
+                    r.get("status"),
+                    r.get("last"),
+                    r.get("opens"),
+                    r.get("downloads"),
+                    r.get("uploads"),
+                ),
+            )
+        feed = [e for e in reversed(ev) if (e.get("action") or "") != "heartbeat"][:250]
+        for e in feed:
+            self.mst_ev.insert(
+                "",
+                "end",
+                values=(
+                    e.get("ts"),
+                    e.get("computer"),
+                    e.get("win_user"),
+                    e.get("version"),
+                    e.get("action"),
+                    e.get("detail"),
+                ),
+            )
+        active = sum(1 for r in pcs if r.get("status") == "Active")
+        self.mst_info.config(
+            text=f"{len(pcs)} PC(s)  {active} active  {len(ev)} events  folder: {share or '(set Shared usage folder)'}"
+        )
+
+    def open_usage_csv(self) -> None:
+        share = self.usage_var.get().strip()
+        if not share:
+            messagebox.showinfo("Usage", "Set Shared usage folder first (same OneDrive path on every PC).")
+            return
+        p = Path(share) / "tpi_usage.csv"
+        if not p.exists():
+            messagebox.showinfo("Usage", f"No CSV yet:\n{p}")
+            return
+        try:
+            os.startfile(str(p))  # type: ignore[attr-defined]
+        except Exception:
+            messagebox.showinfo("Usage", str(p))
+
+    def _heartbeat(self) -> None:
+        try:
+            log_usage("heartbeat")
+        except Exception:
+            pass
+        try:
+            if is_master():
+                self.refresh_master()
+        except Exception:
+            pass
+        self.after(60000, self._heartbeat)
 
     def reset_batch(self):
         self.batch_var.set("")
