@@ -168,7 +168,12 @@ def set_master(password: str) -> None:
     salt = os.urandom(16)
     key = _derive(password, salt)
     digest = hashlib.sha256(key).hexdigest()
-    _save({"salt": base64.b64encode(salt).decode("ascii"), "hash": digest})
+    prev = _load()
+    _save({
+        "salt": base64.b64encode(salt).decode("ascii"),
+        "hash": digest,
+        "sealed": prev.get("sealed") or {},
+    })
     _set_session(key)
 
 
@@ -196,3 +201,22 @@ def unprotect(token: str) -> str:
     if _key is None:
         raise VaultError("Vault is locked.")
     return _fernet(_key).decrypt(token.encode("ascii")).decode("utf-8")
+
+
+def seal_setting(name: str, value: str) -> None:
+    d = _load()
+    sealed = dict(d.get("sealed") or {})
+    sealed[name] = protect(value or "")
+    d["sealed"] = sealed
+    _save(d)
+
+
+def unseal_setting(name: str) -> str:
+    d = _load()
+    tok = (d.get("sealed") or {}).get(name) or ""
+    if not tok:
+        return ""
+    try:
+        return unprotect(tok)
+    except Exception:
+        return ""
