@@ -17,6 +17,12 @@ from vault import days_left, master_is_set, protect, session_unlock, set_master,
 
 ROOT = Path(__file__).resolve().parent
 
+MODULES = (
+    ("download", "1. Download"),
+    ("upload", "2. Upload"),
+    ("summary", "3. Summary"),
+)
+
 def _find_root() -> Path:
     cands = [ROOT, ROOT.parent, Path.cwd(), Path.cwd().parent]
     try:
@@ -168,6 +174,24 @@ def unlock_or_exit(root: tk.Tk) -> bool:
     return False
 
 
+def hidden_modules() -> list[str]:
+    keys = {m[0] for m in MODULES}
+    vals = load_settings().get("hidden_modules") or []
+    return [str(v) for v in vals if str(v) in keys]
+
+
+def ask_master_pw(parent, reason: str) -> bool:
+    pw = simpledialog.askstring("Password", reason, show="*", parent=parent)
+    if not pw:
+        return False
+    try:
+        verify_master(pw)
+        return True
+    except Exception:
+        messagebox.showerror("Password", "Incorrect password.", parent=parent)
+        return False
+
+
 def safe_folder(name: str) -> str:
     keep = "".join(c if c.isalnum() or c in "-_ " else "_" for c in (name or "id"))
     return (keep.strip() or "id")[:40]
@@ -314,18 +338,20 @@ class App(tk.Tk):
 
         mid = ttk.Frame(left)
         mid.pack(fill="x")
-        cols = ("on", "name", "user", "sess", "last")
+        cols = ("on", "name", "user", "last", "sess", "upd")
         self.tree = ttk.Treeview(mid, columns=cols, show="headings", height=3, selectmode="browse")
         self.tree.heading("on", text="On")
         self.tree.heading("name", text="Name")
         self.tree.heading("user", text="Login ID")
-        self.tree.heading("sess", text="Last session")
         self.tree.heading("last", text="Last run")
-        self.tree.column("on", width=44, anchor="center")
-        self.tree.column("name", width=130)
-        self.tree.column("user", width=170)
-        self.tree.column("sess", width=100)
-        self.tree.column("last", width=130)
+        self.tree.heading("sess", text="Last session")
+        self.tree.heading("upd", text="Last update")
+        self.tree.column("on", width=40, anchor="center")
+        self.tree.column("name", width=120)
+        self.tree.column("user", width=160)
+        self.tree.column("last", width=110)
+        self.tree.column("sess", width=90)
+        self.tree.column("upd", width=110)
         self.tree.pack(side="left", fill="x", expand=True)
         sb = ttk.Scrollbar(mid, orient="vertical", command=self.tree.yview)
         sb.pack(side="right", fill="y")
@@ -337,16 +363,21 @@ class App(tk.Tk):
         ttk.Button(actions, text="Edit", command=self.edit_acc).pack(side="left", padx=4)
         ttk.Button(actions, text="Delete", command=self.del_acc).pack(side="left")
         ttk.Button(actions, text="On/Off", command=self.toggle_acc).pack(side="left", padx=4)
+        ttk.Button(actions, text="Modules / Lock", command=self.edit_modules).pack(side="left", padx=8)
         ttk.Button(actions, text="Open save folder", command=self.open_dl).pack(side="right")
 
         self.nb = ttk.Notebook(left)
         self.nb.pack(fill="both", expand=True, pady=(6, 0))
-        tab_dl = ttk.Frame(self.nb, padding=10)
-        tab_up = ttk.Frame(self.nb, padding=10)
-        tab_sum = ttk.Frame(self.nb, padding=10)
+        self.tab_dl = ttk.Frame(self.nb, padding=10)
+        self.tab_up = ttk.Frame(self.nb, padding=10)
+        self.tab_sum = ttk.Frame(self.nb, padding=10)
+        tab_dl = self.tab_dl
+        tab_up = self.tab_up
+        tab_sum = self.tab_sum
         self.nb.add(tab_dl, text="  1. Download  ")
         self.nb.add(tab_up, text="  2. Upload  ")
         self.nb.add(tab_sum, text="  3. Summary  ")
+        self.apply_module_tabs()
 
         ttk.Label(
             tab_dl,
@@ -400,9 +431,6 @@ class App(tk.Tk):
         ttk.Label(gf, text="Google Sheet URL (optional)").pack(anchor="w")
         self.gsheet_var = tk.StringVar(value=load_settings().get("gsheet_url") or "")
         ttk.Entry(gf, textvariable=self.gsheet_var).pack(fill="x")
-        ttk.Label(gf, text="OneDrive web URL of Kautilya E-MB folder (optional — for Kautilya Data links)").pack(anchor="w", pady=(6, 0))
-        self.od_var = tk.StringVar(value=load_settings().get("onedrive_web") or "")
-        ttk.Entry(gf, textvariable=self.od_var).pack(fill="x")
 
         ttk.Label(
             tab_up,
@@ -555,6 +583,87 @@ class App(tk.Tk):
                 "If an ID has no password, open Edit and save the portal password again.\n"
             ))
 
+    def apply_module_tabs(self) -> None:
+        hidden = set(hidden_modules())
+        items = [
+            ("download", self.tab_dl, "  1. Download  "),
+            ("upload", self.tab_up, "  2. Upload  "),
+            ("summary", self.tab_sum, "  3. Summary  "),
+        ]
+        for key, frame, text in items:
+            try:
+                self.nb.tab(frame, state="hidden" if key in hidden else "normal")
+                if key not in hidden:
+                    self.nb.tab(frame, text=text)
+            except Exception:
+                pass
+        visible = [frame for key, frame, _ in items if key not in hidden]
+        if visible:
+            try:
+                cur = self.nb.select()
+                if not cur or self.nb.tab(cur, "state") == "hidden":
+                    self.nb.select(visible[0])
+            except Exception:
+                try:
+                    self.nb.select(visible[0])
+                except Exception:
+                    pass
+
+    def edit_modules(self) -> None:
+        win = tk.Toplevel(self)
+        win.title("Modules")
+        win.resizable(False, False)
+        win.transient(self)
+        win.grab_set()
+        ttk.Label(
+            win,
+            text="Untick a module to hide it. Hidden modules open only after master password.",
+            style="Hint.TLabel",
+            wraplength=420,
+        ).pack(anchor="w", padx=16, pady=(14, 8))
+        hidden = set(hidden_modules())
+        vars_map: dict[str, tk.BooleanVar] = {}
+        for key, label in MODULES:
+            v = tk.BooleanVar(value=key not in hidden)
+            vars_map[key] = v
+            ttk.Checkbutton(win, text=f"Show  {label}", variable=v).pack(anchor="w", padx=20, pady=3)
+        btns = ttk.Frame(win)
+        btns.pack(fill="x", padx=16, pady=14)
+
+        def save():
+            old_hidden = set(hidden_modules())
+            new_hidden = [k for k, _ in MODULES if not vars_map[k].get()]
+            unlocking = [k for k, _ in MODULES if k in old_hidden and k not in new_hidden]
+            if unlocking:
+                names = ", ".join(dict(MODULES)[k] for k in unlocking)
+                if not ask_master_pw(win, f"Enter master password to open: {names}"):
+                    return
+            s = load_settings()
+            s["hidden_modules"] = new_hidden
+            save_settings(s)
+            self.apply_module_tabs()
+            win.destroy()
+
+        ttk.Button(btns, text="Save", style="Green.TButton", command=save).pack(side="right")
+        ttk.Button(btns, text="Cancel", command=win.destroy).pack(side="right", padx=8)
+        win.update_idletasks()
+        x = self.winfo_rootx() + 80
+        y = self.winfo_rooty() + 80
+        win.geometry(f"+{x}+{y}")
+
+    def module_allowed(self, key: str) -> bool:
+        if key not in hidden_modules():
+            return True
+        label = dict(MODULES).get(key, key)
+        if ask_master_pw(self, f"Enter master password to open {label}:"):
+            s = load_settings()
+            hidden = [h for h in hidden_modules() if h != key]
+            s["hidden_modules"] = hidden
+            save_settings(s)
+            self.apply_module_tabs()
+            return True
+        return False
+
     def _apply_style(self):
         s = ttk.Style(self)
         try:
@@ -593,8 +702,9 @@ class App(tk.Tk):
                     "YES" if a.get("enabled", True) else "no",
                     a.get("name") or "",
                     a.get("user") or "",
-                    a.get("last_session") or "-",
                     a.get("last_run") or "-",
+                    a.get("last_session") or "-",
+                    a.get("last_update") or "-",
                 ),
             )
 
@@ -796,6 +906,8 @@ class App(tk.Tk):
         return keys
 
     def run_upload_scan(self):
+        if not self.module_allowed("upload"):
+            return
         self.refresh_upload()
         bad = []
         for iid in self.up_tree.get_children():
@@ -812,12 +924,18 @@ class App(tk.Tk):
             self.write(f"Scan OK: {n} row(s), all PDFs under 7 MB.\n")
 
     def run_upload(self):
+        if not self.module_allowed("upload"):
+            return
         self._start_upload(all_rows=False)
 
     def run_upload_all(self):
+        if not self.module_allowed("upload"):
+            return
         self._start_upload(all_rows=True)
 
     def _start_upload(self, scan_only: bool = False, all_rows: bool = False):
+        if "upload" in hidden_modules() and not self.module_allowed("upload"):
+            return
         i = self.selected_index()
         if i is None:
             messagebox.showinfo("Select", "Select a portal ID in the list above.")
@@ -954,6 +1072,8 @@ class App(tk.Tk):
         self.after(200, self.drain_log)
 
     def run_all(self):
+        if not self.module_allowed("download"):
+            return
         rows = [a for a in self.accounts if a.get("enabled", True)]
         if not rows:
             messagebox.showinfo("IDs", "No ID is enabled. Add or enable an account first.")
@@ -961,6 +1081,8 @@ class App(tk.Tk):
         self._start(rows)
 
     def run_one(self):
+        if not self.module_allowed("download"):
+            return
         i = self.selected_index()
         if i is None:
             messagebox.showinfo("Select", "Select an ID from the list first.")
@@ -1087,7 +1209,6 @@ class App(tk.Tk):
                 env["ACTION_DELAY"] = "0.15"
                 env["PYTHONUNBUFFERED"] = "1"
                 env["TPI_GSHEET"] = self.gsheet_var.get().strip()
-                env["TPI_ONEDRIVE_WEB"] = (getattr(self, "od_var", None) and self.od_var.get().strip()) or ""
                 dls = []
                 if self.dl_excel.get():
                     dls.append("excel")
@@ -1149,8 +1270,6 @@ class App(tk.Tk):
             s = load_settings()
             s["gsheet_url"] = self.gsheet_var.get().strip()
             s["master_path"] = self.master_var.get().strip()
-            if getattr(self, "od_var", None):
-                s["onedrive_web"] = self.od_var.get().strip()
             save_settings(s)
         except Exception:
             pass
