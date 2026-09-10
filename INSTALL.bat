@@ -52,5 +52,6 @@ echo  Use the desktop icon  "TPI MB Downloader"  or START_TPI.bat
 echo  First run: create a master password (8+ characters).
 echo  Every 15 days the app asks for it again.
 echo  Portal passwords stay encrypted. Hide modules from Modules / Lock.
+echo  Use UNINSTALL.bat if you want to remove the app later.
 echo.
 pause
