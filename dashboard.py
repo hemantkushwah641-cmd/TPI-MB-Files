@@ -14,6 +14,8 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
 from vault import days_left, master_is_set, protect, session_unlock, set_master, unprotect, verify_master
+from usage import daily_summary, load_usage, log_usage, whoami
+from version import APP_VERSION
 
 ROOT = Path(__file__).resolve().parent
 
@@ -262,7 +264,7 @@ class AccountDialog(tk.Toplevel):
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("TPI MB Downloader")
+        self.title(f"TPI MB Downloader  v{APP_VERSION}")
         self.geometry("1180x740")
         self.minsize(980, 620)
         self.configure(bg="#f4f5f7")
@@ -273,15 +275,21 @@ class App(tk.Tk):
             self.destroy()
             return
         self.accounts = load_accounts()
+        try:
+            me = whoami()
+            log_usage("app_open", f"{me['win_user']} on {me['computer']}")
+        except Exception:
+            pass
 
         head = ttk.Frame(self, padding=(16, 12, 16, 6))
         head.pack(fill="x")
-        ttk.Label(head, text="TPI Measurement Book", style="Title.TLabel").pack(anchor="w")
+        ttk.Label(head, text="TPI Measurement Book", style="Title.TLabel").pack(side="left")
+        ttk.Label(head, text=f"v{APP_VERSION}", style="Hint.TLabel").pack(side="right")
         ttk.Label(
-            head,
+            self,
             text="Portal IDs stay encrypted. Download left · Upload centre · Log on the right (drag the divider).",
             style="Hint.TLabel",
-        ).pack(anchor="w")
+        ).pack(anchor="w", padx=16)
 
         pathf = ttk.Frame(self, padding=(16, 0, 16, 8))
         pathf.pack(fill="x")
@@ -292,6 +300,12 @@ class App(tk.Tk):
         self.save_entry = ttk.Entry(pr, textvariable=self.save_var)
         self.save_entry.pack(side="left", fill="x", expand=True)
         ttk.Button(pr, text="Browse…", command=self.pick_save).pack(side="left", padx=6)
+        ttk.Label(pathf, text="Shared usage folder (same OneDrive folder on every PC)").pack(anchor="w", pady=(6, 0))
+        ur = ttk.Frame(pathf)
+        ur.pack(fill="x")
+        self.usage_var = tk.StringVar(value=load_settings().get("usage_share") or "")
+        ttk.Entry(ur, textvariable=self.usage_var).pack(side="left", fill="x", expand=True)
+        ttk.Button(ur, text="Browse…", command=self.pick_usage_share).pack(side="left", padx=6)
 
         body = ttk.Panedwindow(self, orient="horizontal")
         body.pack(fill="both", expand=True, padx=12, pady=(0, 12))
@@ -547,6 +561,27 @@ class App(tk.Tk):
         self.sum_act_tot = ttk.Label(tab_sum, text="Period total: —", font=("Segoe UI", 9, "bold"))
         self.sum_act_tot.pack(anchor="e", pady=4)
 
+        ttk.Label(tab_sum, text="Who used the app (this PC + shared folder)", font=("Segoe UI", 10, "bold")).pack(
+            anchor="w", pady=(10, 2)
+        )
+        ucols = ("date", "computer", "user", "ver", "opens", "dl", "up", "last")
+        self.sum_usage = ttk.Treeview(tab_sum, columns=ucols, show="headings", height=5)
+        for c, t, w in (
+            ("date", "Date", 90),
+            ("computer", "Computer", 120),
+            ("user", "Windows user", 120),
+            ("ver", "Version", 70),
+            ("opens", "Opens", 60),
+            ("dl", "Downloads", 80),
+            ("up", "Uploads", 70),
+            ("last", "Last", 70),
+        ):
+            self.sum_usage.heading(c, text=t)
+            self.sum_usage.column(c, width=w, anchor="e" if c in ("opens", "dl", "up") else "w")
+        self.sum_usage.pack(fill="x")
+        self.sum_usage_tot = ttk.Label(tab_sum, text="", style="Hint.TLabel")
+        self.sum_usage_tot.pack(anchor="w", pady=(2, 4))
+
         loghead = ttk.Frame(right)
         loghead.pack(fill="x")
         ttk.Label(loghead, text="LOG", font=("Segoe UI", 10, "bold")).pack(side="left")
@@ -642,6 +677,14 @@ class App(tk.Tk):
             s["hidden_modules"] = new_hidden
             save_settings(s)
             self.apply_module_tabs()
+            try:
+                if unlocking:
+                    log_usage("module_open", ", ".join(unlocking))
+                hiding = [k for k in new_hidden if k not in old_hidden]
+                if hiding:
+                    log_usage("module_hide", ", ".join(hiding))
+            except Exception:
+                pass
             win.destroy()
 
         ttk.Button(btns, text="Save", style="Green.TButton", command=save).pack(side="right")
@@ -759,6 +802,31 @@ class App(tk.Tk):
         self.sum_act_tot.config(
             text=f"Period: Forward {tf} ({fmt_money(fa)})   Return {tr} (Grand Total {fmt_money(rg)})   Bills {tf + tr}"
         )
+        try:
+            for i in self.sum_usage.get_children():
+                self.sum_usage.delete(i)
+            ev = load_usage(dfrom, dto)
+            for r in daily_summary(ev):
+                self.sum_usage.insert(
+                    "",
+                    "end",
+                    values=(
+                        r["date"],
+                        r["computer"],
+                        r["win_user"],
+                        r["version"],
+                        r["opens"],
+                        r["downloads"],
+                        r["uploads"],
+                        r["last"],
+                    ),
+                )
+            pcs = {(x.get("computer"), x.get("win_user"), x.get("version")) for x in ev}
+            self.sum_usage_tot.config(
+                text=f"{len(ev)} events   {len(pcs)} user/PC/version   share: {self.usage_var.get().strip() or '(this PC only)'}"
+            )
+        except Exception as exc:
+            self.sum_usage_tot.config(text=f"Usage log: {exc}")
 
     def reset_batch(self):
         self.batch_var.set("")
@@ -973,6 +1041,10 @@ class App(tk.Tk):
             self.accounts.append(d.result)
             save_accounts(self.accounts)
             self.refresh_tree()
+            try:
+                log_usage("id_add", d.result.get("name") or "")
+            except Exception:
+                pass
 
     def edit_acc(self):
         i = self.selected_index()
@@ -1021,13 +1093,27 @@ class App(tk.Tk):
 
     def pick_save(self):
         cur = self.save_var.get().strip() or str(Path.home())
-        chosen = filedialog.askdirectory(title="Kautilya E-MB folder chuno", initialdir=cur)
+        chosen = filedialog.askdirectory(title="Kautilya E-MB folder", initialdir=cur)
         if chosen:
             self.save_var.set(chosen)
             s = load_settings()
             s["save_root"] = chosen
             save_settings(s)
             self.refresh_days()
+
+    def pick_usage_share(self):
+        cur = self.usage_var.get().strip() or self.save_var.get().strip() or str(Path.home())
+        chosen = filedialog.askdirectory(title="Shared usage folder (same on every PC)", initialdir=cur)
+        if chosen:
+            self.usage_var.set(chosen)
+            s = load_settings()
+            s["usage_share"] = chosen
+            save_settings(s)
+            try:
+                log_usage("usage_share_set", chosen)
+            except Exception:
+                pass
+            self.refresh_summary()
 
     def save_root(self) -> Path | None:
         p = self.save_var.get().strip()
@@ -1123,6 +1209,11 @@ class App(tk.Tk):
         except Exception:
             pass
         self.status.config(text="Running… complete CAPTCHA in the browser")
+        try:
+            names = ", ".join((a.get("name") or a.get("user") or "") for a in rows)
+            log_usage("upload_start" if upload else "download_start", names)
+        except Exception:
+            pass
         threading.Thread(target=self._worker, args=(rows, upload, scan_only, only_keys or []), daemon=True).start()
 
     def _worker(self, rows: list[dict], upload: bool = False, scan_only: bool = False, only_keys: list | None = None):
@@ -1247,7 +1338,15 @@ class App(tk.Tk):
             self.log_q.put(f"\nComplete. Folder: {save_root}\\{day}\\{session}\n")
         except Exception as exc:
             self.log_q.put(f"\nDASHBOARD ERROR: {exc}\n")
+            try:
+                log_usage("error", str(exc)[:200])
+            except Exception:
+                pass
         finally:
+            try:
+                log_usage("upload_done" if upload else "download_done")
+            except Exception:
+                pass
             self.running = False
             self.after(0, self._unlock)
 
@@ -1270,6 +1369,7 @@ class App(tk.Tk):
             s = load_settings()
             s["gsheet_url"] = self.gsheet_var.get().strip()
             s["master_path"] = self.master_var.get().strip()
+            s["usage_share"] = self.usage_var.get().strip()
             save_settings(s)
         except Exception:
             pass
