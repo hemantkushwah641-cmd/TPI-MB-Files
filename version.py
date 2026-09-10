@@ -1,2 +1,3 @@
 APP_NAME = "TPI Measurement Book"
-APP_VERSION = "2.2.0"
+APP_VERSION = "2.3.0"
+
