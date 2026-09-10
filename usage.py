@@ -178,3 +178,55 @@ def daily_summary(events: list[dict]) -> list[dict]:
             }
         )
     return out
+
+
+def pc_status(events: list[dict]) -> list[dict]:
+    """One row per computer + Windows user."""
+    now = datetime.now()
+    today = now.strftime("%Y-%m-%d")
+    acc: dict[tuple, dict] = {}
+    for e in events:
+        key = (e.get("computer") or "-", e.get("win_user") or "-")
+        g = acc.setdefault(
+            key,
+            {
+                "computer": key[0],
+                "win_user": key[1],
+                "version": "",
+                "last": "",
+                "opens": 0,
+                "downloads": 0,
+                "uploads": 0,
+            },
+        )
+        ts = e.get("ts") or ""
+        if ts >= g["last"]:
+            g["last"] = ts
+            g["version"] = e.get("version") or g["version"]
+        if ts[:10] != today:
+            continue
+        act = (e.get("action") or "").lower()
+        if act in ("app_open", "open"):
+            g["opens"] += 1
+        elif "download" in act:
+            g["downloads"] += 1
+        elif "upload" in act:
+            g["uploads"] += 1
+    out = []
+    for g in acc.values():
+        status = "—"
+        try:
+            last = datetime.fromisoformat(g["last"])
+            mins = (now - last).total_seconds() / 60.0
+            if mins <= 15:
+                status = "Active"
+            elif last.strftime("%Y-%m-%d") == today:
+                status = "Today"
+            else:
+                status = "Idle"
+        except Exception:
+            status = "—"
+        g["status"] = status
+        out.append(g)
+    out.sort(key=lambda r: r.get("last") or "", reverse=True)
+    return out
