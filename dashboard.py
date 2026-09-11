@@ -25,7 +25,7 @@ from vault import (
     verify_master,
 )
 from usage import daily_summary, load_usage, log_usage, pc_status, whoami
-from version import APP_VERSION
+from version import display_name, display_version, get_edition
 
 ROOT = Path(__file__).resolve().parent
 
@@ -46,7 +46,7 @@ def _find_root() -> Path:
         p = Path(p)
         if p.is_file():
             p = p.parent
-        if (p / "tpi_mb_downloader.py").exists():
+        if (p / "dashboard.py").exists():
             return p
     return ROOT
 
@@ -278,7 +278,7 @@ class AccountDialog(tk.Toplevel):
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title(f"TPI MB Downloader  v{APP_VERSION}")
+        self.title(f"{display_name()}  v{display_version()}")
         self.geometry("1180x740")
         self.minsize(980, 620)
         self.configure(bg="#f4f5f7")
@@ -304,17 +304,21 @@ class App(tk.Tk):
             pass
         try:
             me = whoami()
-            log_usage("app_open", f"{me['win_user']} on {me['computer']}")
+            log_usage("app_open", f"{me['win_user']} on {me['computer']} [{get_edition()} {display_version()}]")
         except Exception:
             pass
 
         head = ttk.Frame(self, padding=(16, 12, 16, 6))
         head.pack(fill="x")
-        ttk.Label(head, text="TPI Measurement Book", style="Title.TLabel").pack(side="left")
-        ttk.Label(head, text=f"v{APP_VERSION}", style="Hint.TLabel").pack(side="right")
+        ttk.Label(head, text=display_name(), style="Title.TLabel").pack(side="left")
+        ttk.Label(head, text=f"v{display_version()}", style="Hint.TLabel").pack(side="right")
         ttk.Label(
             self,
-            text="Portal IDs stay encrypted. Download left · Upload centre · Log on the right (drag the divider).",
+            text=(
+                "Upload edition. Portal IDs stay encrypted. Batch folder + steps, then PROCEED."
+                if get_edition() == "upload"
+                else "Portal IDs stay encrypted. Download left · Upload centre · Log on the right (drag the divider)."
+            ),
             style="Hint.TLabel",
         ).pack(anchor="w", padx=16)
 
@@ -703,9 +707,11 @@ class App(tk.Tk):
         hidden = set(hidden_modules())
         if not is_master():
             hidden.add("master")
+        if get_edition() == "upload":
+            hidden.update({"download", "summary", "master"})
         items = [
             ("download", self.tab_dl, "  1. Download  "),
-            ("upload", self.tab_up, "  2. Upload  "),
+            ("upload", self.tab_up, "  Upload  " if get_edition() == "upload" else "  2. Upload  "),
             ("summary", self.tab_sum, "  3. Summary  "),
             ("master", self.tab_mst, "  4. Master  "),
         ]
@@ -740,6 +746,14 @@ class App(tk.Tk):
             pass
 
     def edit_modules(self) -> None:
+        if get_edition() == "upload":
+            messagebox.showinfo(
+                "Upload edition",
+                "This is the Upload edition (v{0}).\nDownload, Summary and Master tabs are not in this package.".format(
+                    display_version()
+                ),
+            )
+            return
         win = tk.Toplevel(self)
         win.title("Modules")
         win.resizable(False, False)
@@ -1375,6 +1389,9 @@ class App(tk.Tk):
         self.after(200, self.drain_log)
 
     def run_all(self):
+        if get_edition() == "upload":
+            messagebox.showinfo("Upload edition", "Download is not in this package. Use TPI Upload only.")
+            return
         if not self.module_allowed("download"):
             return
         rows = [a for a in self.accounts if a.get("enabled", True)]
@@ -1384,6 +1401,9 @@ class App(tk.Tk):
         self._start(rows)
 
     def run_one(self):
+        if get_edition() == "upload":
+            messagebox.showinfo("Upload edition", "Download is not in this package.")
+            return
         if not self.module_allowed("download"):
             return
         i = self.selected_index()
