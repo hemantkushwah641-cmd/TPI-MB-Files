@@ -491,7 +491,7 @@ def click_attach_signature(page) -> bool:
             log("  clicked Yes, please! on DSC confirm")
         else:
             page.evaluate(
-                """() => {
+                r"""() => {
                     const b = [...document.querySelectorAll('button,a,.btn')].find(e =>
                         /yes,?\s*please/i.test(e.innerText || '')
                     );
@@ -1137,11 +1137,28 @@ def write_upload_template(path: str | Path) -> Path:
     return path
 
 
+def open_list_fast(page) -> None:
+    """Open TPI list by URL — skip the sidebar menu when possible."""
+    url = page.url or ""
+    try:
+        if table_ready(page) and LIST_PATH in url and "boq_id" not in url:
+            return
+    except Exception:
+        pass
+    log(f"  list URL {BASE_URL}{LIST_PATH}")
+    page.goto(f"{BASE_URL}{LIST_PATH}", wait_until="domcontentloaded", timeout=60000)
+    page.wait_for_timeout(600)
+    dismiss_popups(page, wait_ms=1200)
+    if table_ready(page) and "boq_id" not in (page.url or ""):
+        return
+    go_to_tpi_list(page)
+
+
 def upload_one(page, b: dict, steps: set[str]) -> None:
     fill = b.get("fill") or {}
     btype = _norm_bill_type(fill.get("bill_type") or fill.get("status"))
     row = {"scheme_id": b["scheme_id"], "mb_no": b["mb_no"]}
-    go_to_tpi_list(page)
+    open_list_fast(page)
     detail = open_row(page, row)
     grand = scrape_grand_total(detail)
     if grand:
@@ -1209,7 +1226,7 @@ def upload_one(page, b: dict, steps: set[str]) -> None:
     try:
         back_to_tpi_list(page)
     except Exception:
-        go_to_tpi_list(page)
+        open_list_fast(page)
 
 
 def _free_port() -> int:
@@ -1348,18 +1365,14 @@ def main() -> None:
     npar = max(1, min(10, npar))
     log(f"Parallel tabs after login: {npar}")
 
-    proc = None
-    user_dir = ""
-    try:
-        proc, cdp, user_dir = _start_chrome(bool(args.headed))
-        log(f"Chrome (one window, tabs): {cdp}")
-        with sync_playwright() as pw:
-            browser = pw.chromium.connect_over_cdp(cdp)
-            ctx = browser.contexts[0]
-            page = ctx.pages[0] if ctx.pages else ctx.new_page()
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch(headless=not args.headed)
+        context = browser.new_context(accept_downloads=True)
+        page = context.new_page()
+        try:
             if not args.skip_login:
                 login(page)
-            go_to_tpi_list(page)
+            open_list_fast(page)
             if npar <= 1 or len(pending) <= 1:
                 for i, b in enumerate(pending, 1):
                     log(f"[{i}/{len(pending)}] upload {b['scheme_id']} {b['mb_no']}")
@@ -1369,42 +1382,47 @@ def main() -> None:
                         log(f"  ERROR: {exc}")
                         save_debug(page, f"upload_err_{b['scheme_id']}")
                         try:
-                            go_to_tpi_list(page)
+                            open_list_fast(page)
                         except Exception:
                             pass
             else:
-                log("Login OK. Opening parallel tabs in this same window (CAPTCHA not needed again).")
+                log("Login OK. Same Chrome window — extra tabs for each bill.")
                 for start in range(0, len(pending), npar):
                     wave = pending[start : start + npar]
                     wnum = start // npar + 1
                     wtot = (len(pending) + npar - 1) // npar
                     log(f"======== Wave {wnum}/{wtot}  {len(wave)} tab(s) ========")
-                    with ThreadPoolExecutor(max_workers=len(wave)) as pool:
-                        futs = [
-                            pool.submit(
-                                _worker_tab,
-                                cdp,
-                                b,
-                                steps,
-                                start + i + 1,
-                                len(pending),
-                            )
-                            for i, b in enumerate(wave)
-                        ]
-                        for fut in as_completed(futs):
-                            log(f"  tab result: {fut.result()}")
-    finally:
-        if proc:
-            try:
-                proc.terminate()
-                proc.wait(timeout=5)
-            except Exception:
-                try:
-                    proc.kill()
-                except Exception:
-                    pass
-        if user_dir:
-            shutil.rmtree(user_dir, ignore_errors=True)
+                    tabs = []
+                    for i, b in enumerate(wave):
+                        idx = start + i + 1
+                        log(f"[{idx}/{len(pending)}] tab open {b['scheme_id']} {b['mb_no']}")
+                        tab = context.new_page()
+                        try:
+                            open_list_fast(tab)
+                            tabs.append((tab, b, idx))
+                        except Exception as exc:
+                            log(f"  tab open FAIL {b['scheme_id']}: {exc}")
+                            try:
+                                tab.close()
+                            except Exception:
+                                pass
+                    for tab, b, idx in tabs:
+                        log(f"[{idx}/{len(pending)}] upload {b['scheme_id']} {b['mb_no']}")
+                        try:
+                            upload_one(tab, b, steps)
+                        except Exception as exc:
+                            log(f"  ERROR: {exc}")
+                            try:
+                                save_debug(tab, f"upload_err_{b['scheme_id']}")
+                            except Exception:
+                                pass
+                        try:
+                            tab.close()
+                        except Exception:
+                            pass
+        finally:
+            context.close()
+            browser.close()
     log("Upload finished.")
 
 
