@@ -994,16 +994,7 @@ def load_batch(folder: Path) -> list[dict]:
         if status.lower().startswith("verif") or status.lower() == "forward":
             btype = "forward"
         amount = "0.00" if btype == "return" else cell(iamt)
-        files = []
-        if letter:
-            pat = re.compile(rf"^{re.escape(letter)}(?:[\s_\-]|$)", re.I)
-            for p in sorted(folder.iterdir()):
-                if not p.is_file() or p.name.startswith("~$"):
-                    continue
-                if p.suffix.lower() in {".xlsx", ".xls"}:
-                    continue
-                if pat.match(p.name):
-                    files.append(str(p))
+        files = _files_for_letter(folder, letter)
         bills.append({
             "scheme_id": sid,
             "mb_no": mb.replace("-", "/"),
@@ -1020,6 +1011,31 @@ def load_batch(folder: Path) -> list[dict]:
             },
         })
     return bills
+
+
+def _norm_id(s: str) -> str:
+    """Ceinsys/DVP/BLP/2026-27/09/0010  ==  Ceinsys-DVP-BLP-2026-27-09-0010"""
+    s = (s or "").strip().lower()
+    s = s.replace("\\", "/")
+    s = re.sub(r"[/\s._]+", "-", s)
+    s = re.sub(r"-{2,}", "-", s)
+    return s.strip("-")
+
+
+def _files_for_letter(folder: Path, letter: str) -> list[str]:
+    key = _norm_id(letter)
+    if not key:
+        return []
+    files = []
+    for p in sorted(folder.iterdir()):
+        if not p.is_file() or p.name.startswith("~$"):
+            continue
+        if p.suffix.lower() in {".xlsx", ".xls"}:
+            continue
+        nk = _norm_id(p.stem)
+        if nk == key or nk.startswith(key + "-"):
+            files.append(str(p))
+    return files
 
 
 TEMPLATE_HEADERS = [
@@ -1073,7 +1089,7 @@ def write_upload_template(path: str | Path) -> Path:
         "1. Delete the sample row (row 2) before a real batch.",
         "2. One row = one bill. Scheme ID and MB No. must match the portal list.",
         "3. Bill Type: Forward or Return. Return sets Amount to 0.00 and skips DSC.",
-        "4. TPI Letter Number is also the PDF prefix. File name must start with that letter, e.g. TPI/CKT/001 TPI Report.pdf",
+        "4. TPI Letter Number in Excel can use / or - . File may use the other: Ceinsys/DVP/BLP/2026-27/09/0010 matches Ceinsys-DVP-BLP-2026-27-09-0010.pdf",
         "5. Put this Excel and all PDFs in the same batch folder. Each PDF max 7 MB.",
         "6. In the app: Browse that folder → Scan Excel + files → PROCEED.",
         "7. Parallel: the app logs in once, then opens up to 5 windows for 5 bills, then the next 5.",
