@@ -245,10 +245,22 @@ def upload_files_on_detail(page, files: list[str], letter: str = "") -> list[str
             log(f"  ERROR: file over 7 MB, skipped: {p.name} ({p.stat().st_size/1024/1024:.1f} MB)")
             continue
         log(f"  uploading {p.name}")
+        send = p
+        tmp_dir = None
+        try:
+            label = _file_description(letter, p)
+            safe = re.sub(r'[<>:"/\\|?*]', "-", label).strip(" .") or "TPI Letter"
+            tmp_dir = tempfile.mkdtemp(prefix="tpi-up-")
+            send = Path(tmp_dir) / f"{safe}{p.suffix.lower() or '.pdf'}"
+            shutil.copy2(p, send)
+            log(f"  upload as: {send.name}")
+        except Exception as exc:
+            log(f"  rename copy: {exc}")
+            send = p
         try:
             attached = False
             try:
-                file_input.first.set_input_files(str(p))
+                file_input.first.set_input_files(str(send))
                 attached = True
             except Exception as exc:
                 log(f"  set_input_files: {exc}")
@@ -260,9 +272,9 @@ def upload_files_on_detail(page, files: list[str], letter: str = "") -> list[str
                             chooser_btn.first.click(timeout=5000)
                         else:
                             file_input.first.click(timeout=5000, force=True)
-                    fc_info.value.set_files(str(p))
+                    fc_info.value.set_files(str(send))
                     attached = True
-                    log(f"  file chooser set {p.name}")
+                    log(f"  file chooser set {send.name}")
                 except Exception as exc:
                     log(f"  file chooser: {exc}")
             if not attached:
@@ -294,10 +306,13 @@ def upload_files_on_detail(page, files: list[str], letter: str = "") -> list[str
             click_modal_ok(page, wait_ms=2000)
             dismiss_popups(page, wait_ms=200)
             saved.append(str(p))
-            log(f"  uploaded {p.name}")
+            log(f"  uploaded {send.name}")
         except Exception as exc:
             log(f"  upload fail {p.name}: {exc}")
             save_debug(page, f"upload_fail_{p.stem[:30]}")
+        finally:
+            if tmp_dir:
+                shutil.rmtree(tmp_dir, ignore_errors=True)
     return saved
 
 
