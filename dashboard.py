@@ -503,12 +503,13 @@ class App(tk.Tk):
 
         uf = ttk.Frame(tab_up)
         uf.pack(fill="x")
-        ttk.Label(uf, text="Batch folder (Upload Template.xlsx + PDFs)").pack(anchor="w")
+        ttk.Label(uf, text="Select Upload Template.xlsx — PDFs must be in the same folder").pack(anchor="w")
         ur = ttk.Frame(uf)
         ur.pack(fill="x")
         self.batch_var = tk.StringVar(value=load_settings().get("batch_folder") or "")
         ttk.Entry(ur, textvariable=self.batch_var).pack(side="left", fill="x", expand=True)
-        ttk.Button(ur, text="Browse…", command=self.pick_batch).pack(side="left", padx=6)
+        ttk.Button(ur, text="Select Excel…", command=self.pick_batch).pack(side="left", padx=6)
+        ttk.Button(ur, text="Folder…", command=self.pick_batch_folder).pack(side="left", padx=2)
         ttk.Button(ur, text="Reset", command=self.reset_batch).pack(side="left", padx=4)
         ttk.Button(ur, text="Download template", command=self.save_upload_template).pack(side="left", padx=4)
         self.btn_up_scan = ttk.Button(ur, text="  Scan Excel + files  ", style="Accent.TButton", command=self.run_upload_scan)
@@ -1062,7 +1063,25 @@ class App(tk.Tk):
 
     def pick_batch(self):
         start = self.batch_var.get().strip() or str(Path.home() / "Downloads")
-        chosen = filedialog.askdirectory(title="Batch folder (Upload Template + PDFs)", initialdir=start)
+        chosen = filedialog.askopenfilename(
+            title="Select Upload Template.xlsx",
+            initialdir=start,
+            filetypes=[("Excel template", "*.xlsx"), ("All files", "*.*")],
+        )
+        if not chosen:
+            return
+        folder = str(Path(chosen).parent)
+        self.batch_var.set(folder)
+        s = load_settings()
+        s["batch_folder"] = folder
+        s["batch_excel"] = chosen
+        save_settings(s)
+        self.write(f"Template: {Path(chosen).name}\nFolder: {folder}\n")
+        self.refresh_upload()
+
+    def pick_batch_folder(self):
+        start = self.batch_var.get().strip() or str(Path.home() / "Downloads")
+        chosen = filedialog.askdirectory(title="Folder that has Upload Template.xlsx + PDFs", initialdir=start)
         if chosen:
             self.batch_var.set(chosen)
             s = load_settings()
@@ -1089,12 +1108,18 @@ class App(tk.Tk):
             messagebox.showerror("Template", str(exc))
             return
         self.write(f"Template saved: {path}\n")
+        folder = str(Path(path).parent)
+        self.batch_var.set(folder)
+        s = load_settings()
+        s["batch_folder"] = folder
+        save_settings(s)
+        self.refresh_upload()
         messagebox.showinfo(
             "Template",
-            "Upload Template saved.\n\n"
-            "Put this Excel in the batch folder with the PDFs.\n"
-            "PDF names must start with TPI Letter Number.\n"
-            "Bill Type column: Forward or Return.",
+            f"Saved:\n{path}\n\n"
+            "Keep TPI report PDFs in this same folder.\n"
+            "Then click Scan Excel + files.\n"
+            "Do not pick files in the Chrome window — the app attaches PDFs itself.",
         )
 
     def refresh_days(self):
