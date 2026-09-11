@@ -11,7 +11,7 @@ from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 
-from version import APP_VERSION
+from version import display_version, get_edition
 
 ROOT = Path(__file__).resolve().parent
 LOCAL = ROOT / ".tpidata" / "usage.jsonl"
@@ -20,7 +20,8 @@ CSV_HEADERS = ["DateTime", "Computer", "WindowsUser", "Version", "Action", "Deta
 
 def whoami() -> dict:
     return {
-        "version": APP_VERSION,
+        "version": display_version(),
+        "edition": get_edition(),
         "computer": os.environ.get("COMPUTERNAME") or socket.gethostname() or "-",
         "win_user": os.environ.get("USERNAME") or getpass.getuser() or "-",
     }
