@@ -525,9 +525,9 @@ class App(tk.Tk):
         self.btn_up_all = ttk.Button(ubar, text="  Upload all rows  ", style="Accent.TButton", command=self.run_upload_all)
         self.btn_up_all.pack(side="left")
         ttk.Label(ubar, text="  Parallel windows").pack(side="left", padx=(16, 4))
-        self.parallel_var = tk.IntVar(value=5)
-        ttk.Spinbox(ubar, from_=1, to=5, width=4, textvariable=self.parallel_var).pack(side="left")
-        ttk.Label(ubar, text="(login once, then 5 bills together)", style="Hint.TLabel").pack(side="left", padx=6)
+        self.parallel_var = tk.StringVar(value="5")
+        ttk.Entry(ubar, textvariable=self.parallel_var, width=5).pack(side="left")
+        ttk.Label(ubar, text="(type a number, e.g. 5 — login once, then that many bills together)", style="Hint.TLabel").pack(side="left", padx=6)
 
         ut = ttk.Frame(tab_up)
         ut.pack(fill="both", expand=True)
@@ -1516,7 +1516,7 @@ class App(tk.Tk):
                         steps.append("action")
                     env["TPI_STEPS"] = ",".join(steps)
                     try:
-                        env["TPI_PARALLEL"] = str(max(1, min(5, int(self.parallel_var.get() or 5))))
+                        env["TPI_PARALLEL"] = str(max(1, min(10, int(str(self.parallel_var.get() or "5").strip() or "5"))))
                     except Exception:
                         env["TPI_PARALLEL"] = "5"
                     env["PYTHONUNBUFFERED"] = "1"
