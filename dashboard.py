@@ -525,10 +525,10 @@ class App(tk.Tk):
         self.btn_up.pack(side="left", padx=10)
         self.btn_up_all = ttk.Button(ubar, text="  Upload all rows  ", style="Accent.TButton", command=self.run_upload_all)
         self.btn_up_all.pack(side="left")
-        ttk.Label(ubar, text="  Parallel windows").pack(side="left", padx=(16, 4))
+        ttk.Label(ubar, text="  Parallel tabs").pack(side="left", padx=(16, 4))
         self.parallel_var = tk.StringVar(value="5")
         ttk.Entry(ubar, textvariable=self.parallel_var, width=5).pack(side="left")
-        ttk.Label(ubar, text="(type a number, e.g. 5 — login once, then that many bills together)", style="Hint.TLabel").pack(side="left", padx=6)
+        ttk.Label(ubar, text="(type a number 1–10 — same Chrome window, that many tabs)", style="Hint.TLabel").pack(side="left", padx=6)
 
         ut = ttk.Frame(tab_up)
         ut.pack(fill="both", expand=True)
