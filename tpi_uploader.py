@@ -17,6 +17,8 @@ import argparse
 import os
 import re
 import sys
+import tempfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
@@ -1020,6 +1022,173 @@ def load_batch(folder: Path) -> list[dict]:
     return bills
 
 
+TEMPLATE_HEADERS = [
+    "Scheme ID",
+    "MB No.",
+    "Amount Approved by TPI",
+    "TPI Letter Number",
+    "Remark",
+    "Bill Type",
+]
+
+
+def write_upload_template(path: str | Path) -> Path:
+    """Create Upload Template.xlsx the operator fills, then Scan Excel + files."""
+    from openpyxl import Workbook
+    from openpyxl.styles import Alignment, Font, PatternFill
+    from openpyxl.utils import get_column_letter
+    from openpyxl.worksheet.datavalidation import DataValidation
+
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Upload"
+    head_fill = PatternFill("solid", fgColor="14213D")
+    head_font = Font(color="FFFFFF", bold=True, name="Calibri", size=11)
+    hint_fill = PatternFill("solid", fgColor="FFF4E6")
+    for i, h in enumerate(TEMPLATE_HEADERS, 1):
+        cell = ws.cell(1, i, h)
+        cell.fill = head_fill
+        cell.font = head_font
+        cell.alignment = Alignment(horizontal="center", wrap_text=True)
+    ws.cell(2, 1, "20130179")
+    ws.cell(2, 2, "RA/CIVIL/001")
+    ws.cell(2, 3, "123456.00")
+    ws.cell(2, 4, "TPI/CKT/001")
+    ws.cell(2, 5, "Verified and recommended for payment")
+    ws.cell(2, 6, "Forward")
+    for c in range(1, 7):
+        ws.cell(2, c).fill = hint_fill
+    dv = DataValidation(type="list", formula1='"Forward,Return"', allow_blank=False)
+    dv.error = "Use Forward or Return"
+    dv.errorTitle = "Bill Type"
+    dv.prompt = "Forward = Verified (DSC). Return = amount 0.00, no DSC."
+    dv.promptTitle = "Bill Type"
+    ws.add_data_validation(dv)
+    dv.add("F2:F200")
+    note = wb.create_sheet("How to use")
+    lines = [
+        "TPI Upload Template",
+        "1. Delete the sample row (row 2) before a real batch.",
+        "2. One row = one bill. Scheme ID and MB No. must match the portal list.",
+        "3. Bill Type: Forward or Return. Return sets Amount to 0.00 and skips DSC.",
+        "4. TPI Letter Number is also the PDF prefix. File name must start with that letter, e.g. TPI/CKT/001 TPI Report.pdf",
+        "5. Put this Excel and all PDFs in the same batch folder. Each PDF max 7 MB.",
+        "6. In the app: Browse that folder → Scan Excel + files → PROCEED.",
+        "7. Parallel: the app logs in once, then opens up to 5 windows for 5 bills, then the next 5.",
+    ]
+    for i, t in enumerate(lines, 1):
+        note.cell(i, 1, t)
+        note.cell(i, 1).font = Font(bold=(i == 1), name="Calibri", size=12 if i == 1 else 11)
+    note.column_dimensions["A"].width = 110
+    widths = [16, 16, 26, 22, 48, 14]
+    for i, w in enumerate(widths, 1):
+        ws.column_dimensions[get_column_letter(i)].width = w
+    ws.row_dimensions[1].height = 22
+    ws.freeze_panes = "A2"
+    ws.auto_filter.ref = "A1:F200"
+    wb.save(path)
+    return path
+
+
+def upload_one(page, b: dict, steps: set[str]) -> None:
+    fill = b.get("fill") or {}
+    btype = _norm_bill_type(fill.get("bill_type") or fill.get("status"))
+    row = {"scheme_id": b["scheme_id"], "mb_no": b["mb_no"]}
+    go_to_tpi_list(page)
+    detail = open_row(page, row)
+    grand = scrape_grand_total(detail)
+    if grand:
+        log(f"  Grand Total: {grand}")
+    if btype == "return":
+        fill["amount"] = "0.00"
+    log(f"  bill type: {btype}  steps={sorted(steps)}")
+    if "files" in steps:
+        uploaded = upload_files_on_detail(detail, b["files"])
+        log(f"  files uploaded: {len(uploaded)}")
+    if "fill" in steps:
+        fill_tpi_fields(detail, fill)
+        saved = click_save_as_draft(detail)
+        if not saved:
+            log("  retry fill letter + save")
+            fill_tpi_fields(detail, fill)
+            saved = click_save_as_draft(detail)
+        log("  waiting for Action box after Save Draft...")
+        settle_detail(detail)
+    if "dsc" in steps and btype == "forward":
+        click_attach_signature(detail)
+    elif "dsc" in steps:
+        log("  Return bill — skip DSC")
+    ok_act = False
+    if "action" in steps:
+        try:
+            settle_detail(detail)
+            if select_action(detail, btype):
+                ok_act = generate_otp_and_submit(detail, btype)
+            else:
+                log("  skip OTP — action not selected")
+        except Exception as exc:
+            log(f"  Action/OTP step: {exc}")
+            save_debug(detail, "action_step_fail")
+        try:
+            batch = Path(b.get("path") or os.getenv("TPI_BATCH") or ".")
+            tag = "Return" if btype == "return" else "Forward"
+            st = "OK" if ok_act else "FAIL"
+            fn = f"{b.get('scheme_id')}_{win_name(b.get('mb_no') or '', 20)}_{tag}_{st}_{datetime.now().strftime('%H%M%S')}.png"
+            dest = batch / fn
+            detail.screenshot(path=str(dest), full_page=True)
+            log(f"  screenshot saved: {dest.name}")
+        except Exception as exc:
+            log(f"  screenshot: {exc}")
+    try:
+        from activity import log_event
+        log_event(
+            kind="upload",
+            action="return" if btype == "return" else "forward",
+            cluster=os.getenv("TPI_CLUSTER") or "",
+            district=b.get("district") or "",
+            scheme_id=b.get("scheme_id") or "",
+            mb_no=b.get("mb_no") or "",
+            amount=(fill or {}).get("amount") or "",
+            grand_total=grand,
+            letter=(fill or {}).get("letter") or "",
+        )
+    except Exception as exc:
+        log(f"  activity: {exc}")
+    if detail != page:
+        try:
+            detail.close()
+        except Exception:
+            pass
+    try:
+        back_to_tpi_list(page)
+    except Exception:
+        go_to_tpi_list(page)
+
+
+def _worker_browser(bill: dict, steps: set[str], state_path: str, headed: bool, idx: int, total: int) -> str:
+    sid = bill.get("scheme_id") or ""
+    mb = bill.get("mb_no") or ""
+    log(f"[{idx}/{total}] parallel window  {sid} {mb}")
+    from playwright.sync_api import sync_playwright
+    try:
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch(headless=not headed)
+            context = browser.new_context(storage_state=state_path, accept_downloads=True)
+            page = context.new_page()
+            try:
+                go_to_tpi_list(page)
+                upload_one(page, bill, steps)
+                return f"OK {sid} {mb}"
+            finally:
+                context.close()
+                browser.close()
+    except Exception as exc:
+        log(f"  ERROR {sid} {mb}: {exc}")
+        return f"FAIL {sid} {mb}: {exc}"
+
+
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="TPI MB uploader")
     p.add_argument("--headed", action="store_true")
@@ -1028,6 +1197,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--day", default="", help="DD.MM.YYYY (legacy)")
     p.add_argument("--session", default="")
     p.add_argument("--skip-login", action="store_true")
+    p.add_argument("--parallel", type=int, default=0, help="Bills at once after login (default 5, max 5)")
     return p.parse_args()
 
 
@@ -1074,6 +1244,13 @@ def main() -> None:
     if not USER or not PASSWORD:
         sys.exit("ERROR: PORTAL_USER / PORTAL_PASS missing")
 
+    try:
+        npar = int(args.parallel or os.getenv("TPI_PARALLEL") or 5)
+    except Exception:
+        npar = 5
+    npar = max(1, min(5, npar))
+    log(f"Parallel windows after login: {npar}")
+
     with sync_playwright() as pw:
         browser = pw.chromium.launch(headless=not args.headed)
         context = browser.new_context(accept_downloads=True)
@@ -1082,84 +1259,47 @@ def main() -> None:
             if not args.skip_login:
                 login(page)
             go_to_tpi_list(page)
-            for i, b in enumerate(pending, 1):
-                log(f"[{i}/{len(pending)}] upload {b['scheme_id']} {b['mb_no']}")
-                row = {"scheme_id": b["scheme_id"], "mb_no": b["mb_no"]}
-                try:
-                    go_to_tpi_list(page)
-                    detail = open_row(page, row)
-                    fill = b.get("fill") or {}
-                    btype = _norm_bill_type(fill.get("bill_type") or fill.get("status"))
-                    grand = scrape_grand_total(detail)
-                    if grand:
-                        log(f"  Grand Total: {grand}")
-                    if btype == "return":
-                        fill["amount"] = "0.00"
-                    log(f"  bill type: {btype}  steps={sorted(steps)}")
-                    if "files" in steps:
-                        uploaded = upload_files_on_detail(detail, b["files"])
-                        log(f"  files uploaded: {len(uploaded)}")
-                    saved = True
-                    if "fill" in steps:
-                        fill_tpi_fields(detail, fill)
-                        saved = click_save_as_draft(detail)
-                        if not saved:
-                            log("  retry fill letter + save")
-                            fill_tpi_fields(detail, fill)
-                            saved = click_save_as_draft(detail)
-                        log("  waiting for Action box after Save Draft...")
-                        settle_detail(detail)
-                    if "dsc" in steps and btype == "forward":
-                        click_attach_signature(detail)
-                    elif "dsc" in steps:
-                        log("  Return bill — skip DSC")
-                    ok_act = False
-                    if "action" in steps:
-                        try:
-                            settle_detail(detail)
-                            if select_action(detail, btype):
-                                ok_act = generate_otp_and_submit(detail, btype)
-                            else:
-                                log("  skip OTP — action not selected")
-                        except Exception as exc:
-                            log(f"  Action/OTP step: {exc}")
-                            save_debug(detail, "action_step_fail")
-                        try:
-                            batch = Path(b.get("path") or os.getenv("TPI_BATCH") or ".")
-                            tag = "Return" if btype == "return" else "Forward"
-                            st = "OK" if ok_act else "FAIL"
-                            fn = f"{b.get('scheme_id')}_{win_name(b.get('mb_no') or '', 20)}_{tag}_{st}_{datetime.now().strftime('%H%M%S')}.png"
-                            dest = batch / fn
-                            detail.screenshot(path=str(dest), full_page=True)
-                            log(f"  screenshot saved: {dest.name}")
-                        except Exception as exc:
-                            log(f"  screenshot: {exc}")
+            if npar <= 1 or len(pending) <= 1:
+                for i, b in enumerate(pending, 1):
+                    log(f"[{i}/{len(pending)}] upload {b['scheme_id']} {b['mb_no']}")
                     try:
-                        from activity import log_event
-                        log_event(
-                            kind="upload",
-                            action="return" if btype == "return" else "forward",
-                            cluster=os.getenv("TPI_CLUSTER") or "",
-                            district=b.get("district") or "",
-                            scheme_id=b.get("scheme_id") or "",
-                            mb_no=b.get("mb_no") or "",
-                            amount=(fill or {}).get("amount") or "",
-                            grand_total=grand,
-                            letter=(fill or {}).get("letter") or "",
-                        )
+                        upload_one(page, b, steps)
                     except Exception as exc:
-                        log(f"  activity: {exc}")
-                    if detail != page:
+                        log(f"  ERROR: {exc}")
+                        save_debug(page, f"upload_err_{b['scheme_id']}")
                         try:
-                            detail.close()
+                            go_to_tpi_list(page)
                         except Exception:
                             pass
-                    back_to_tpi_list(page)
-                except Exception as exc:
-                    log(f"  ERROR: {exc}")
-                    save_debug(page, f"upload_err_{b['scheme_id']}")
+            else:
+                fd, state_path = tempfile.mkstemp(suffix=".json")
+                os.close(fd)
+                context.storage_state(path=state_path)
+                log("Login saved. Opening parallel windows (CAPTCHA not needed again).")
+                try:
+                    for start in range(0, len(pending), npar):
+                        wave = pending[start : start + npar]
+                        wnum = start // npar + 1
+                        wtot = (len(pending) + npar - 1) // npar
+                        log(f"======== Wave {wnum}/{wtot}  {len(wave)} window(s) ========")
+                        with ThreadPoolExecutor(max_workers=len(wave)) as pool:
+                            futs = [
+                                pool.submit(
+                                    _worker_browser,
+                                    b,
+                                    steps,
+                                    state_path,
+                                    args.headed,
+                                    start + i + 1,
+                                    len(pending),
+                                )
+                                for i, b in enumerate(wave)
+                            ]
+                            for fut in as_completed(futs):
+                                log(f"  wave result: {fut.result()}")
+                finally:
                     try:
-                        go_to_tpi_list(page)
+                        os.remove(state_path)
                     except Exception:
                         pass
         finally:
