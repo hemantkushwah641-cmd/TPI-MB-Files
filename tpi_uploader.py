@@ -1197,7 +1197,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--day", default="", help="DD.MM.YYYY (legacy)")
     p.add_argument("--session", default="")
     p.add_argument("--skip-login", action="store_true")
-    p.add_argument("--parallel", type=int, default=0, help="Bills at once after login (default 5, max 5)")
+    p.add_argument("--parallel", type=int, default=0, help="Bills at once after login (default 5, max 10)")
     return p.parse_args()
 
 
@@ -1248,7 +1248,7 @@ def main() -> None:
         npar = int(args.parallel or os.getenv("TPI_PARALLEL") or 5)
     except Exception:
         npar = 5
-    npar = max(1, min(5, npar))
+    npar = max(1, min(10, npar))
     log(f"Parallel windows after login: {npar}")
 
     with sync_playwright() as pw:
