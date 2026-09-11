@@ -205,14 +205,31 @@ def list_sessions(root: Path, day: str) -> list[str]:
     return sorted(sess, key=lambda s: int(re.search(r"\d+", s).group(0)))
 
 
-def upload_files_on_detail(page, files: list[str]) -> list[str]:
+def _file_description(letter: str, path: Path) -> str:
+    """Ceinsys-DVP-...-0010 Return TPI Letter.pdf  →  Return TPI Letter"""
+    stem = path.stem
+    letter = (letter or "").strip()
+    if letter:
+        parts = [p for p in re.split(r"[/\s._-]+", letter) if p]
+        if parts:
+            pat = r"[\s._/\-]*".join(re.escape(p) for p in parts)
+            rest = re.sub(r"^" + pat + r"[\s._\-]*", "", stem, flags=re.I).strip(" -_")
+            if rest:
+                return rest[:80]
+    m = re.search(r"(Return|Forward|TPI Letter|TPI Report|Supporting).*$", stem, re.I)
+    if m:
+        return m.group(0).strip()[:80]
+    return stem[:80]
+
+
+def upload_files_on_detail(page, files: list[str], letter: str = "") -> list[str]:
     """Choose File → Description → UPLOAD, one file at a time (max 7 MB)."""
     saved: list[str] = []
     try:
         page.get_by_text("Upload file if any", exact=False).first.scroll_into_view_if_needed(timeout=8000)
     except Exception:
         page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-    page.wait_for_timeout(500)
+    page.wait_for_timeout(150)
 
     file_input = page.locator("input[type='file']")
     if file_input.count() == 0:
@@ -251,12 +268,14 @@ def upload_files_on_detail(page, files: list[str]) -> list[str]:
             if not attached:
                 log(f"  could not attach {p.name} — skip")
                 continue
-            page.wait_for_timeout(400)
+            page.wait_for_timeout(120)
             desc = page.get_by_placeholder(re.compile("file description", re.I))
             if desc.count() == 0:
                 desc = page.locator("input[placeholder*='Description' i], textarea[placeholder*='Description' i]")
             if desc.count():
-                desc.first.fill(p.stem[:80])
+                label = _file_description(letter, p)
+                desc.first.fill(label)
+                log(f"  description: {label}")
             btn = page.get_by_role("button", name=re.compile(r"^\s*upload\s*$", re.I))
             if btn.count() == 0:
                 btn = page.get_by_text(re.compile(r"^\s*upload\s*$", re.I))
@@ -271,9 +290,9 @@ def upload_files_on_detail(page, files: list[str]) -> list[str]:
                         if (b) b.click();
                     }"""
                 )
-            page.wait_for_timeout(800)
-            click_modal_ok(page, wait_ms=4000)
-            dismiss_popups(page, wait_ms=400)
+            page.wait_for_timeout(250)
+            click_modal_ok(page, wait_ms=2000)
+            dismiss_popups(page, wait_ms=200)
             saved.append(str(p))
             log(f"  uploaded {p.name}")
         except Exception as exc:
@@ -296,16 +315,16 @@ def _type_into(page, loc, value: str, tab: bool = True) -> bool:
     except Exception:
         pass
     loc.click(timeout=5000)
-    page.wait_for_timeout(200)
+    page.wait_for_timeout(80)
     loc.press("Control+A")
     page.wait_for_timeout(80)
     loc.press("Backspace")
     page.wait_for_timeout(80)
-    page.keyboard.type(value, delay=70)
-    page.wait_for_timeout(150)
+    page.keyboard.type(value, delay=18)
+    page.wait_for_timeout(80)
     if tab:
         loc.press("Tab")
-        page.wait_for_timeout(250)
+        page.wait_for_timeout(80)
     try:
         got = loc.input_value()
     except Exception:
@@ -314,16 +333,33 @@ def _type_into(page, loc, value: str, tab: bool = True) -> bool:
         loc.click()
         loc.press("Control+A")
         loc.press("Backspace")
-        page.keyboard.type(value, delay=90)
+        page.keyboard.type(value, delay=18)
         if tab:
             loc.press("Tab")
-            page.wait_for_timeout(200)
+            page.wait_for_timeout(80)
         try:
             got = loc.input_value()
         except Exception:
             got = ""
     log(f"    typed '{value}' now='{got}'")
     return str(got).strip() == value.strip() or (got.replace(",", "") == value.replace(",", ""))
+
+
+def fill_letter_number(page, letter: str) -> bool:
+    letter = (letter or "").strip()
+    if not letter:
+        return False
+    loc = page.get_by_placeholder(re.compile("TPI Letter Number", re.I))
+    if loc.count() == 0:
+        loc = page.locator(
+            "xpath=//*[contains(normalize-space(.),'TPI Letter Number')][1]/following::input[1]"
+        )
+    if not loc.count():
+        log("  TPI Letter Number box not found")
+        return False
+    ok = _type_into(page, loc.first, letter)
+    log(f"  TPI Letter Number = {letter} ({ok})")
+    return ok
 
 
 def fill_tpi_fields(page, fill: dict) -> None:
@@ -1147,8 +1183,8 @@ def open_list_fast(page) -> None:
         pass
     log(f"  list URL {BASE_URL}{LIST_PATH}")
     page.goto(f"{BASE_URL}{LIST_PATH}", wait_until="domcontentloaded", timeout=60000)
-    page.wait_for_timeout(600)
-    dismiss_popups(page, wait_ms=1200)
+    page.wait_for_timeout(250)
+    dismiss_popups(page, wait_ms=600)
     if table_ready(page) and "boq_id" not in (page.url or ""):
         return
     go_to_tpi_list(page)
@@ -1167,8 +1203,10 @@ def upload_one(page, b: dict, steps: set[str]) -> None:
         fill["amount"] = "0.00"
     log(f"  bill type: {btype}  steps={sorted(steps)}")
     if "files" in steps:
-        uploaded = upload_files_on_detail(detail, b["files"])
+        uploaded = upload_files_on_detail(detail, b["files"], letter=fill.get("letter") or "")
         log(f"  files uploaded: {len(uploaded)}")
+    if fill.get("letter") and "fill" not in steps:
+        fill_letter_number(detail, fill.get("letter") or "")
     if "fill" in steps:
         fill_tpi_fields(detail, fill)
         saved = click_save_as_draft(detail)
@@ -1373,53 +1411,17 @@ def main() -> None:
             if not args.skip_login:
                 login(page)
             open_list_fast(page)
-            if npar <= 1 or len(pending) <= 1:
-                for i, b in enumerate(pending, 1):
-                    log(f"[{i}/{len(pending)}] upload {b['scheme_id']} {b['mb_no']}")
+            for i, b in enumerate(pending, 1):
+                log(f"[{i}/{len(pending)}] upload {b['scheme_id']} {b['mb_no']}")
+                try:
+                    upload_one(page, b, steps)
+                except Exception as exc:
+                    log(f"  ERROR: {exc}")
+                    save_debug(page, f"upload_err_{b['scheme_id']}")
                     try:
-                        upload_one(page, b, steps)
-                    except Exception as exc:
-                        log(f"  ERROR: {exc}")
-                        save_debug(page, f"upload_err_{b['scheme_id']}")
-                        try:
-                            open_list_fast(page)
-                        except Exception:
-                            pass
-            else:
-                log("Login OK. Same Chrome window — extra tabs for each bill.")
-                for start in range(0, len(pending), npar):
-                    wave = pending[start : start + npar]
-                    wnum = start // npar + 1
-                    wtot = (len(pending) + npar - 1) // npar
-                    log(f"======== Wave {wnum}/{wtot}  {len(wave)} tab(s) ========")
-                    tabs = []
-                    for i, b in enumerate(wave):
-                        idx = start + i + 1
-                        log(f"[{idx}/{len(pending)}] tab open {b['scheme_id']} {b['mb_no']}")
-                        tab = context.new_page()
-                        try:
-                            open_list_fast(tab)
-                            tabs.append((tab, b, idx))
-                        except Exception as exc:
-                            log(f"  tab open FAIL {b['scheme_id']}: {exc}")
-                            try:
-                                tab.close()
-                            except Exception:
-                                pass
-                    for tab, b, idx in tabs:
-                        log(f"[{idx}/{len(pending)}] upload {b['scheme_id']} {b['mb_no']}")
-                        try:
-                            upload_one(tab, b, steps)
-                        except Exception as exc:
-                            log(f"  ERROR: {exc}")
-                            try:
-                                save_debug(tab, f"upload_err_{b['scheme_id']}")
-                            except Exception:
-                                pass
-                        try:
-                            tab.close()
-                        except Exception:
-                            pass
+                        open_list_fast(page)
+                    except Exception:
+                        pass
         finally:
             context.close()
             browser.close()
