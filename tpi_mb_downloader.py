@@ -10,6 +10,7 @@ import json
 import os
 import re
 import sys
+import time
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
@@ -412,38 +413,57 @@ def _js_click_text(page, text: str) -> bool:
     )
 
 
-def dismiss_popups(page, wait_ms: int = 4000) -> None:
-    loc = page.get_by_text("ACKNOWLEDGE", exact=True)
-    try:
-        loc.last.wait_for(state="visible", timeout=wait_ms)
-        log("ACKNOWLEDGE dikha — click.")
-        loc.last.click(force=True)
-        page.wait_for_timeout(400)
-    except Exception:
-        pass
-    closed = page.evaluate(
-        """() => {
-            const modal = document.getElementById('warningModal');
-            let how = 'none';
-            if (modal) {
-                const btn = Array.from(modal.querySelectorAll('button, a, .btn'))
-                    .find(b => /acknowledge/i.test(b.textContent || ''));
-                if (btn) { btn.click(); how = 'btn'; }
-                modal.classList.remove('show');
-                modal.style.display = 'none';
-                modal.setAttribute('aria-hidden', 'true');
-                if (how === 'none') how = 'hide';
-            }
-            document.querySelectorAll('.modal-backdrop').forEach(e => e.remove());
-            document.body.classList.remove('modal-open');
-            document.body.style.removeProperty('overflow');
-            document.body.style.removeProperty('padding-right');
-            return how;
-        }"""
-    )
-    if closed and closed != "none":
-        log(f"warningModal closed: {closed}")
-        page.wait_for_timeout(400)
+def dismiss_popups(page, wait_ms: int = 1500) -> None:
+    """Click ACKNOWLEDGE as soon as it appears — do not wait the full timeout."""
+    deadline = time.time() + max(0.2, wait_ms / 1000.0)
+    clicked = False
+    while time.time() < deadline:
+        try:
+            loc = page.get_by_text(re.compile(r"ACKNOWLEDGE", re.I))
+            n = loc.count()
+            if n:
+                el = loc.last
+                if el.is_visible():
+                    el.click(force=True, timeout=600)
+                    log("ACKNOWLEDGE clicked")
+                    clicked = True
+                    break
+        except Exception:
+            pass
+        how = page.evaluate(
+            """() => {
+                const modal = document.getElementById('warningModal');
+                let how = 'none';
+                const hit = [...document.querySelectorAll('button, a, .btn')].find(b =>
+                    /acknowledge/i.test((b.textContent || '').replace(/\\s+/g,' '))
+                    && b.getBoundingClientRect().width
+                );
+                if (hit) { hit.click(); how = 'btn'; }
+                if (modal) {
+                    if (how === 'none') {
+                        const btn = [...modal.querySelectorAll('button, a, .btn')]
+                            .find(b => /acknowledge/i.test(b.textContent || ''));
+                        if (btn) { btn.click(); how = 'btn'; }
+                    }
+                    modal.classList.remove('show');
+                    modal.style.display = 'none';
+                    modal.setAttribute('aria-hidden', 'true');
+                    if (how === 'none') how = 'hide';
+                }
+                document.querySelectorAll('.modal-backdrop').forEach(e => e.remove());
+                document.body.classList.remove('modal-open');
+                document.body.style.removeProperty('overflow');
+                document.body.style.removeProperty('padding-right');
+                return how;
+            }"""
+        )
+        if how and how != "none":
+            log(f"warningModal closed: {how}")
+            clicked = True
+            break
+        page.wait_for_timeout(60)
+    if clicked:
+        page.wait_for_timeout(120)
 
 
 def login(page) -> None:
@@ -690,9 +710,8 @@ def login(page) -> None:
         save_debug(page, "login_captcha_timeout")
         sys.exit("ERROR: 3 minute mein login complete nahi hua.")
 
-    page.wait_for_timeout(int(ACTION_DELAY * 1000))
     log(f"Login OK. Ab URL: {page.url}")
-    dismiss_popups(page, wait_ms=8000)
+    dismiss_popups(page, wait_ms=2500)
 
 
 def table_ready(page) -> bool:
@@ -712,8 +731,8 @@ def is_detail_page(page) -> bool:
 
 def open_list_url(page) -> None:
     page.goto(f"{BASE_URL}{LIST_PATH}", wait_until="domcontentloaded", timeout=60000)
-    page.wait_for_timeout(1800)
-    dismiss_popups(page, wait_ms=1200)
+    page.wait_for_timeout(400)
+    dismiss_popups(page, wait_ms=800)
 
 
 def click_detail_back(page) -> bool:
