@@ -221,7 +221,28 @@ def upload_files_on_detail(page, files: list[str]) -> list[str]:
             continue
         log(f"  uploading {p.name}")
         try:
-            file_input.first.set_input_files(str(p))
+            attached = False
+            try:
+                file_input.first.set_input_files(str(p))
+                attached = True
+            except Exception as exc:
+                log(f"  set_input_files: {exc}")
+            if not attached:
+                try:
+                    with page.expect_file_chooser(timeout=8000) as fc_info:
+                        chooser_btn = page.get_by_text(re.compile(r"choose file|browse|select file", re.I))
+                        if chooser_btn.count():
+                            chooser_btn.first.click(timeout=5000)
+                        else:
+                            file_input.first.click(timeout=5000, force=True)
+                    fc_info.value.set_files(str(p))
+                    attached = True
+                    log(f"  file chooser set {p.name}")
+                except Exception as exc:
+                    log(f"  file chooser: {exc}")
+            if not attached:
+                log(f"  could not attach {p.name} — skip")
+                continue
             page.wait_for_timeout(400)
             desc = page.get_by_placeholder(re.compile("file description", re.I))
             if desc.count() == 0:
