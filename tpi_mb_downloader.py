@@ -1114,8 +1114,8 @@ def open_row(page, row: dict):
         save_debug(page, f"no_inner_search_{key}")
         raise RuntimeError(f"Search by LoA Number box nahi mili: {info}")
 
-    page.wait_for_timeout(700)
-    dismiss_popups(page, wait_ms=200)
+    page.wait_for_timeout(350)
+    dismiss_popups(page, wait_ms=150)
 
     mb = str(row.get("mb_no") or "").strip()
     nvis = page.evaluate(
@@ -1127,8 +1127,8 @@ def open_row(page, row: dict):
     log(f"  matching rows after search: {nvis} (scheme {key} mb {mb})")
 
     def after_click(tag: str):
-        page.wait_for_timeout(900)
-        dismiss_popups(page, wait_ms=250)
+        page.wait_for_timeout(400)
+        dismiss_popups(page, wait_ms=150)
         for p in page.context.pages:
             if p not in old_pages:
                 try:
