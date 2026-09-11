@@ -1005,27 +1005,63 @@ def generate_otp_and_submit(page, btype: str) -> bool:
     return True
 
 
+def _read_xlsx_rows(xlsx: Path, max_row: int = 500, max_col: int = 16):
+    """Read Excel via a temp copy so an open/OneDrive-locked file still works."""
+    from openpyxl import load_workbook
+    last: Exception | None = None
+    for attempt in range(5):
+        tmp = None
+        try:
+            fd, tmp = tempfile.mkstemp(prefix="tpi-xlsx-", suffix=".xlsx")
+            os.close(fd)
+            with open(xlsx, "rb") as src:
+                data = src.read()
+            with open(tmp, "wb") as dst:
+                dst.write(data)
+            wb = load_workbook(tmp, data_only=True, read_only=True)
+            try:
+                rows = list(wb.active.iter_rows(max_row=max_row, max_col=max_col, values_only=True))
+            finally:
+                wb.close()
+            return rows
+        except PermissionError as exc:
+            last = exc
+            time.sleep(0.45 * (attempt + 1))
+        except Exception as exc:
+            last = exc
+            time.sleep(0.25)
+        finally:
+            if tmp:
+                try:
+                    os.remove(tmp)
+                except Exception:
+                    pass
+    raise PermissionError(
+        f"Cannot read {xlsx.name} (Error 13). Close this file in Excel, wait for OneDrive, then Scan again."
+    ) from last
+
+
 def load_batch(folder: Path) -> list[dict]:
     """Batch folder: Upload Template.xlsx + PDFs named '{Letter} TPI Report...'."""
     folder = Path(folder)
+    xlsx = None
+    if folder.is_file() and folder.suffix.lower() in {".xlsx", ".xls"}:
+        xlsx = folder
+        folder = folder.parent
     if not folder.exists():
         log(f"Batch folder not found: {folder}")
         return []
-    xlsx = None
-    for p in folder.glob("*.xlsx"):
-        if p.name.startswith("~$"):
-            continue
-        xlsx = p
-        if "upload" in p.name.lower() or "template" in p.name.lower():
-            break
+    if xlsx is None:
+        for p in folder.glob("*.xlsx"):
+            if p.name.startswith("~$"):
+                continue
+            xlsx = p
+            if "upload" in p.name.lower() or "template" in p.name.lower():
+                break
     if not xlsx:
         log("No Excel (Upload Template) in batch folder")
         return []
-    from openpyxl import load_workbook
-    wb = load_workbook(xlsx, data_only=True, read_only=True)
-    ws = wb.active
-    rows = list(ws.iter_rows(max_row=500, max_col=16, values_only=True))
-    wb.close()
+    rows = _read_xlsx_rows(xlsx)
     if not rows:
         return []
     headers = [re.sub(r"\s+", " ", str(c or "")).strip().lower() for c in rows[0]]
