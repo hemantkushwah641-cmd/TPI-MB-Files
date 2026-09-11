@@ -777,14 +777,28 @@ def back_to_tpi_list(page) -> None:
 
 def go_to_tpi_list(page) -> None:
     dismiss_popups(page, wait_ms=2000)
-    if "/login" in (page.url or "") or "/error" in (page.url or ""):
-        log("Leaving login/error page")
+    url = page.url or ""
+    if (
+        url.startswith("about:")
+        or "/login" in url
+        or "/error" in url
+        or not url.startswith("http")
+    ):
+        log(f"Opening portal home (was {url or 'blank'})")
         try:
-            page.goto(f"{BASE_URL}/homezone", wait_until="domcontentloaded", timeout=30000)
-            page.wait_for_timeout(1200)
+            page.goto(f"{BASE_URL}/homezone", wait_until="domcontentloaded", timeout=60000)
+            page.wait_for_timeout(1500)
         except Exception as exc:
             log(f"  homezone: {exc}")
+            try:
+                page.goto(f"{BASE_URL}/login", wait_until="domcontentloaded", timeout=60000)
+                page.wait_for_timeout(1200)
+            except Exception:
+                pass
         dismiss_popups(page, wait_ms=2000)
+        url = page.url or ""
+        if "/login" in url:
+            log("  still on login — session missing in this window")
 
     if is_detail_page(page):
         log(f"On bill detail, leaving: {page.url}")
@@ -830,7 +844,7 @@ def go_to_tpi_list(page) -> None:
 
     save_debug(page, "tpi_list_not_found")
     log(f"Still not list. URL: {page.url}")
-    sys.exit("ERROR: TPI list did not open.")
+    raise RuntimeError(f"TPI list did not open. URL: {page.url}")
 
 
 def click_sidebar(page, text: str) -> bool:
