@@ -4,8 +4,8 @@ import os
 from pathlib import Path
 
 APP_NAME = "TPI Measurement Book"
-APP_VERSION = "2.4.0"
-UPLOAD_VERSION = "2.4.0"
+APP_VERSION = "2.4.1"
+UPLOAD_VERSION = "2.4.1"
 
 
 def get_edition() -> str:
