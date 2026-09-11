@@ -16,8 +16,13 @@ from __future__ import annotations
 import argparse
 import os
 import re
+import shutil
+import socket
+import subprocess
 import sys
 import tempfile
+import time
+import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
@@ -26,6 +31,7 @@ from tpi_mb_downloader import (
     ACTION_DELAY,
     BASE_URL,
     DOWNLOAD_DIR,
+    LIST_PATH,
     USER,
     PASSWORD,
     back_to_tpi_list,
@@ -34,9 +40,11 @@ from tpi_mb_downloader import (
     go_to_tpi_list,
     log,
     login,
+    open_list_url,
     open_row,
     save_debug,
     scrape_grand_total,
+    table_ready,
     today_stamp,
     win_name,
 )
@@ -1204,23 +1212,75 @@ def upload_one(page, b: dict, steps: set[str]) -> None:
         go_to_tpi_list(page)
 
 
-def _worker_browser(bill: dict, steps: set[str], state_path: str, headed: bool, idx: int, total: int) -> str:
+def _free_port() -> int:
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
+
+
+def _start_chrome(headed: bool) -> tuple[subprocess.Popen, str, str]:
+    port = _free_port()
+    user_dir = tempfile.mkdtemp(prefix="tpi-chrome-")
+    with sync_playwright() as pw:
+        exe = pw.chromium.executable_path
+    args = [
+        exe,
+        f"--remote-debugging-port={port}",
+        f"--user-data-dir={user_dir}",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--disable-session-crashed-bubble",
+        "--start-maximized",
+    ]
+    if not headed:
+        args.append("--headless=new")
+    args.append(f"{BASE_URL}/login")
+    proc = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    cdp = f"http://127.0.0.1:{port}"
+    for _ in range(50):
+        try:
+            urllib.request.urlopen(cdp + "/json/version", timeout=0.4)
+            break
+        except Exception:
+            time.sleep(0.2)
+            if proc.poll() is not None:
+                raise RuntimeError("Chrome exited before it was ready")
+    else:
+        raise RuntimeError("Chrome debug port did not open")
+    return proc, cdp, user_dir
+
+
+def _worker_tab(cdp: str, bill: dict, steps: set[str], idx: int, total: int) -> str:
     sid = bill.get("scheme_id") or ""
     mb = bill.get("mb_no") or ""
-    log(f"[{idx}/{total}] parallel window  {sid} {mb}")
+    log(f"[{idx}/{total}] tab  {sid} {mb}")
     from playwright.sync_api import sync_playwright
     try:
         with sync_playwright() as pw:
-            browser = pw.chromium.launch(headless=not headed)
-            context = browser.new_context(storage_state=state_path, accept_downloads=True)
-            page = context.new_page()
+            browser = pw.chromium.connect_over_cdp(cdp)
+            ctx = browser.contexts[0]
+            page = ctx.new_page()
             try:
-                go_to_tpi_list(page)
+                page.goto(f"{BASE_URL}{LIST_PATH}", wait_until="domcontentloaded", timeout=60000)
+                page.wait_for_timeout(800)
+                dismiss_popups(page, wait_ms=2000)
+                url = page.url or ""
+                if "/login" in url or "/error" in url or "about:" in url:
+                    page.goto(f"{BASE_URL}/homezone", wait_until="domcontentloaded", timeout=60000)
+                    page.wait_for_timeout(800)
+                    dismiss_popups(page, wait_ms=1500)
+                    go_to_tpi_list(page)
+                elif not table_ready(page):
+                    go_to_tpi_list(page)
                 upload_one(page, bill, steps)
                 return f"OK {sid} {mb}"
             finally:
-                context.close()
-                browser.close()
+                try:
+                    page.close()
+                except Exception:
+                    pass
     except Exception as exc:
         log(f"  ERROR {sid} {mb}: {exc}")
         return f"FAIL {sid} {mb}: {exc}"
@@ -1286,13 +1346,17 @@ def main() -> None:
     except Exception:
         npar = 5
     npar = max(1, min(10, npar))
-    log(f"Parallel windows after login: {npar}")
+    log(f"Parallel tabs after login: {npar}")
 
-    with sync_playwright() as pw:
-        browser = pw.chromium.launch(headless=not args.headed)
-        context = browser.new_context(accept_downloads=True)
-        page = context.new_page()
-        try:
+    proc = None
+    user_dir = ""
+    try:
+        proc, cdp, user_dir = _start_chrome(bool(args.headed))
+        log(f"Chrome (one window, tabs): {cdp}")
+        with sync_playwright() as pw:
+            browser = pw.chromium.connect_over_cdp(cdp)
+            ctx = browser.contexts[0]
+            page = ctx.pages[0] if ctx.pages else ctx.new_page()
             if not args.skip_login:
                 login(page)
             go_to_tpi_list(page)
@@ -1309,39 +1373,38 @@ def main() -> None:
                         except Exception:
                             pass
             else:
-                fd, state_path = tempfile.mkstemp(suffix=".json")
-                os.close(fd)
-                context.storage_state(path=state_path)
-                log("Login saved. Opening parallel windows (CAPTCHA not needed again).")
+                log("Login OK. Opening parallel tabs in this same window (CAPTCHA not needed again).")
+                for start in range(0, len(pending), npar):
+                    wave = pending[start : start + npar]
+                    wnum = start // npar + 1
+                    wtot = (len(pending) + npar - 1) // npar
+                    log(f"======== Wave {wnum}/{wtot}  {len(wave)} tab(s) ========")
+                    with ThreadPoolExecutor(max_workers=len(wave)) as pool:
+                        futs = [
+                            pool.submit(
+                                _worker_tab,
+                                cdp,
+                                b,
+                                steps,
+                                start + i + 1,
+                                len(pending),
+                            )
+                            for i, b in enumerate(wave)
+                        ]
+                        for fut in as_completed(futs):
+                            log(f"  tab result: {fut.result()}")
+    finally:
+        if proc:
+            try:
+                proc.terminate()
+                proc.wait(timeout=5)
+            except Exception:
                 try:
-                    for start in range(0, len(pending), npar):
-                        wave = pending[start : start + npar]
-                        wnum = start // npar + 1
-                        wtot = (len(pending) + npar - 1) // npar
-                        log(f"======== Wave {wnum}/{wtot}  {len(wave)} window(s) ========")
-                        with ThreadPoolExecutor(max_workers=len(wave)) as pool:
-                            futs = [
-                                pool.submit(
-                                    _worker_browser,
-                                    b,
-                                    steps,
-                                    state_path,
-                                    args.headed,
-                                    start + i + 1,
-                                    len(pending),
-                                )
-                                for i, b in enumerate(wave)
-                            ]
-                            for fut in as_completed(futs):
-                                log(f"  wave result: {fut.result()}")
-                finally:
-                    try:
-                        os.remove(state_path)
-                    except Exception:
-                        pass
-        finally:
-            context.close()
-            browser.close()
+                    proc.kill()
+                except Exception:
+                    pass
+        if user_dir:
+            shutil.rmtree(user_dir, ignore_errors=True)
     log("Upload finished.")
 
 
