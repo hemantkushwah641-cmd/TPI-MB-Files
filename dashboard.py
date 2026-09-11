@@ -510,6 +510,7 @@ class App(tk.Tk):
         ttk.Entry(ur, textvariable=self.batch_var).pack(side="left", fill="x", expand=True)
         ttk.Button(ur, text="Browse…", command=self.pick_batch).pack(side="left", padx=6)
         ttk.Button(ur, text="Reset", command=self.reset_batch).pack(side="left", padx=4)
+        ttk.Button(ur, text="Download template", command=self.save_upload_template).pack(side="left", padx=4)
         self.btn_up_scan = ttk.Button(ur, text="  Scan Excel + files  ", style="Accent.TButton", command=self.run_upload_scan)
         self.btn_up_scan.pack(side="left", padx=4)
         self.up_summary = ttk.Label(tab_up, text="No batch loaded.", style="Hint.TLabel")
@@ -523,6 +524,10 @@ class App(tk.Tk):
         self.btn_up.pack(side="left", padx=10)
         self.btn_up_all = ttk.Button(ubar, text="  Upload all rows  ", style="Accent.TButton", command=self.run_upload_all)
         self.btn_up_all.pack(side="left")
+        ttk.Label(ubar, text="  Parallel windows").pack(side="left", padx=(16, 4))
+        self.parallel_var = tk.IntVar(value=5)
+        ttk.Spinbox(ubar, from_=1, to=5, width=4, textvariable=self.parallel_var).pack(side="left")
+        ttk.Label(ubar, text="(login once, then 5 bills together)", style="Hint.TLabel").pack(side="left", padx=6)
 
         ut = ttk.Frame(tab_up)
         ut.pack(fill="both", expand=True)
@@ -1065,6 +1070,33 @@ class App(tk.Tk):
             save_settings(s)
             self.refresh_upload()
 
+    def save_upload_template(self):
+        start = self.batch_var.get().strip() or str(self.save_root() or Path.home())
+        path = filedialog.asksaveasfilename(
+            title="Save Upload Template",
+            defaultextension=".xlsx",
+            initialdir=start,
+            initialfile="Upload_Template.xlsx",
+            filetypes=[("Excel", "*.xlsx")],
+        )
+        if not path:
+            return
+        try:
+            from tpi_uploader import write_upload_template
+
+            write_upload_template(path)
+        except Exception as exc:
+            messagebox.showerror("Template", str(exc))
+            return
+        self.write(f"Template saved: {path}\n")
+        messagebox.showinfo(
+            "Template",
+            "Upload Template saved.\n\n"
+            "Put this Excel in the batch folder with the PDFs.\n"
+            "PDF names must start with TPI Letter Number.\n"
+            "Bill Type column: Forward or Return.",
+        )
+
     def refresh_days(self):
         self.refresh_upload()
 
@@ -1483,8 +1515,12 @@ class App(tk.Tk):
                     if self.step_action.get():
                         steps.append("action")
                     env["TPI_STEPS"] = ",".join(steps)
+                    try:
+                        env["TPI_PARALLEL"] = str(max(1, min(5, int(self.parallel_var.get() or 5))))
+                    except Exception:
+                        env["TPI_PARALLEL"] = "5"
                     env["PYTHONUNBUFFERED"] = "1"
-                    cmd = [str(PY), str(UPLOADER), "--headed", "--batch", batch]
+                    cmd = [str(PY), str(UPLOADER), "--headed", "--batch", batch, "--parallel", env["TPI_PARALLEL"]]
                     if scan_only:
                         cmd.append("--scan-only")
                     proc = subprocess.Popen(
