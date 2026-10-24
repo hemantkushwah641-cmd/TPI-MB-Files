@@ -730,9 +730,94 @@ def is_detail_page(page) -> bool:
 
 
 def open_list_url(page) -> None:
-    page.goto(f"{BASE_URL}{LIST_PATH}", wait_until="domcontentloaded", timeout=60000)
-    page.wait_for_timeout(400)
-    dismiss_popups(page, wait_ms=800)
+    log(f"Open list URL")
+    try:
+        page.goto(f"{BASE_URL}{LIST_PATH}", wait_until="domcontentloaded", timeout=45000)
+    except Exception as exc:
+        log(f"  list goto: {exc}")
+    page.wait_for_timeout(250)
+    dismiss_popups(page, wait_ms=500)
+
+
+def _list_via_sidebar(page) -> bool:
+    """Click the real TPI menu link only when it is visible. Never click a hidden node."""
+    if "/error" in (page.url or "") or "/login" in (page.url or ""):
+        try:
+            page.goto(f"{BASE_URL}/homezone", wait_until="domcontentloaded", timeout=30000)
+        except Exception as exc:
+            log(f"  homezone: {exc}")
+        page.wait_for_timeout(300)
+        dismiss_popups(page, wait_ms=500)
+    expand_measurements(page)
+    clicked = page.evaluate(
+        """() => {
+            const want = /third-party-inspection/i;
+            const links = [...document.querySelectorAll('a')];
+            const vis = (e) => {
+                const r = e.getBoundingClientRect();
+                const s = getComputedStyle(e);
+                return r.width > 2 && r.height > 2 && s.visibility !== 'hidden' && s.display !== 'none';
+            };
+            let a = links.find(e => vis(e) && want.test((e.getAttribute('href') || '') + (e.getAttribute('routerlink') || '')));
+            if (!a) {
+                a = links.find(e => vis(e) && /TPI\\s*\\(Third Party Inspection/i.test((e.innerText || '').replace(/\\s+/g, ' ')));
+            }
+            if (!a) return false;
+            a.click();
+            return true;
+        }"""
+    )
+    log(f"  sidebar TPI link clicked={clicked}")
+    return bool(clicked)
+
+
+def go_to_tpi_list(page) -> None:
+    dismiss_popups(page, wait_ms=700)
+    url = page.url or ""
+    if url.startswith("about:") or "/login" in url or not url.startswith("http"):
+        log(f"Opening portal home (was {url or 'blank'})")
+        try:
+            page.goto(f"{BASE_URL}/homezone", wait_until="domcontentloaded", timeout=45000)
+        except Exception as exc:
+            log(f"  homezone: {exc}")
+        page.wait_for_timeout(300)
+        dismiss_popups(page, wait_ms=600)
+
+    for attempt in range(3):
+        if table_ready(page) and not is_detail_page(page):
+            log(f"TPI table ready. URL: {page.url}")
+            return
+        if attempt or "/error" in (page.url or ""):
+            log(f"List retry {attempt + 1} from home. URL: {page.url}")
+            try:
+                page.goto(f"{BASE_URL}/homezone", wait_until="domcontentloaded", timeout=30000)
+            except Exception as exc:
+                log(f"  homezone: {exc}")
+            page.wait_for_timeout(250)
+            dismiss_popups(page, wait_ms=500)
+            if attempt >= 1:
+                _list_via_sidebar(page)
+                for _ in range(8):
+                    if table_ready(page) and not is_detail_page(page):
+                        log(f"TPI table ready (menu). URL: {page.url}")
+                        return
+                    if "/error" in (page.url or ""):
+                        break
+                    page.wait_for_timeout(200)
+                continue
+        open_list_url(page)
+        for _ in range(8):
+            if table_ready(page) and not is_detail_page(page):
+                log(f"TPI table ready (URL). URL: {page.url}")
+                return
+            if "/error" in (page.url or ""):
+                log(f"  list landed on error")
+                break
+            page.wait_for_timeout(200)
+
+    save_debug(page, "tpi_list_not_found")
+    log(f"Still not list. URL: {page.url}")
+    raise RuntimeError(f"TPI list did not open. URL: {page.url}")
 
 
 def click_detail_back(page) -> bool:
@@ -794,99 +879,25 @@ def back_to_tpi_list(page) -> None:
     go_to_tpi_list(page)
 
 
-def go_to_tpi_list(page) -> None:
-    dismiss_popups(page, wait_ms=2000)
-    url = page.url or ""
-    if (
-        url.startswith("about:")
-        or "/login" in url
-        or "/error" in url
-        or not url.startswith("http")
-    ):
-        log(f"Opening portal home (was {url or 'blank'})")
-        try:
-            page.goto(f"{BASE_URL}/homezone", wait_until="domcontentloaded", timeout=60000)
-            page.wait_for_timeout(1500)
-        except Exception as exc:
-            log(f"  homezone: {exc}")
-            try:
-                page.goto(f"{BASE_URL}/login", wait_until="domcontentloaded", timeout=60000)
-                page.wait_for_timeout(1200)
-            except Exception:
-                pass
-        dismiss_popups(page, wait_ms=2000)
-        url = page.url or ""
-        if "/login" in url:
-            log("  still on login — session missing in this window")
-
-    if is_detail_page(page):
-        log(f"On bill detail, leaving: {page.url}")
-        click_detail_back(page)
-        if not table_ready(page):
-            open_list_url(page)
-        if table_ready(page):
-            log(f"TPI list ready. URL: {page.url}")
-            return
-
-    if table_ready(page) and not is_detail_page(page):
-        log(f"TPI table already open. URL: {page.url}")
-        return
-
-    log(f"Opening TPI list from menu. URL: {page.url}")
-    expand_measurements(page)
-    page.wait_for_timeout(800)
-    click_sidebar(page, "Normal Measurement")
-    page.wait_for_timeout(600)
-    click_sidebar(page, "TPI (Third Party Inspection Civil)")
-    page.wait_for_timeout(1800)
-    dismiss_popups(page, wait_ms=1200)
-
-    for _ in range(15):
-        if table_ready(page) and not is_detail_page(page):
-            log(f"TPI table ready (menu). URL: {page.url}")
-            return
-        page.wait_for_timeout(400)
-
-    log("Menu did not open list — using list URL")
-    if "/error" in (page.url or ""):
-        try:
-            page.goto(f"{BASE_URL}/homezone", wait_until="domcontentloaded", timeout=30000)
-            page.wait_for_timeout(1000)
-        except Exception:
-            pass
-    open_list_url(page)
-    for _ in range(12):
-        if table_ready(page) and not is_detail_page(page):
-            log(f"TPI table ready (URL). URL: {page.url}")
-            return
-        page.wait_for_timeout(400)
-
-    save_debug(page, "tpi_list_not_found")
-    log(f"Still not list. URL: {page.url}")
-    raise RuntimeError(f"TPI list did not open. URL: {page.url}")
-
-
 def click_sidebar(page, text: str) -> bool:
     log(f"Menu click: {text}")
     vis = page.get_by_text(text, exact=False).locator("visible=true")
     n = vis.count()
     log(f"  visible_matches={n}")
-    if n:
+    if not n:
+        log("  skip — menu item not visible")
+        return False
+    try:
+        vis.last.click(timeout=2500)
+        page.wait_for_timeout(250)
+        return True
+    except Exception:
         try:
-            vis.last.click(timeout=4000)
-            page.wait_for_timeout(900)
+            vis.last.click(timeout=2000, force=True)
+            page.wait_for_timeout(250)
             return True
         except Exception:
-            try:
-                vis.last.click(timeout=3000, force=True)
-                page.wait_for_timeout(900)
-                return True
-            except Exception:
-                pass
-    ok = _js_click_text(page, text)
-    page.wait_for_timeout(900)
-    log(f"  js_click={ok}")
-    return ok
+            return False
 
 
 def expand_measurements(page) -> None:
@@ -907,7 +918,7 @@ def expand_measurements(page) -> None:
         }"""
     )
     log(f"  expand result: {info}")
-    page.wait_for_timeout(800)
+    page.wait_for_timeout(250)
 
 
 def scrape_current_page(page) -> list[dict]:
@@ -1954,9 +1965,9 @@ def main() -> None:
         except SystemExit as e:
             if "PORTAL_USER" in str(e) or ".env" in str(e):
                 raise
-            log("Browser 45 second khula rahega.")
+            log("Browser 8 seconds, then close.")
             try:
-                page.wait_for_timeout(45000)
+                page.wait_for_timeout(8000)
             except Exception:
                 pass
             raise
@@ -1964,7 +1975,7 @@ def main() -> None:
             log(f"FATAL: {exc}")
             save_debug(page, "fatal")
             try:
-                page.wait_for_timeout(45000)
+                page.wait_for_timeout(8000)
             except Exception:
                 pass
             raise
