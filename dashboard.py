@@ -317,6 +317,8 @@ class App(tk.Tk):
             text=(
                 "Upload edition. Portal IDs stay encrypted. Batch folder + steps, then PROCEED."
                 if get_edition() == "upload"
+                else "Download edition. Portal IDs stay encrypted. Select IDs, tick steps, then Download."
+                if get_edition() == "download"
                 else "Portal IDs stay encrypted. Download left · Upload centre · Log on the right (drag the divider)."
             ),
             style="Hint.TLabel",
@@ -715,6 +717,8 @@ class App(tk.Tk):
             hidden.add("master")
         if get_edition() == "upload":
             hidden.update({"download", "summary", "master"})
+        if get_edition() == "download":
+            hidden.update({"upload", "summary", "master"})
         items = [
             ("download", self.tab_dl, "  1. Download  "),
             ("upload", self.tab_up, "  Upload  " if get_edition() == "upload" else "  2. Upload  "),
@@ -756,6 +760,14 @@ class App(tk.Tk):
             messagebox.showinfo(
                 "Upload edition",
                 "This is the Upload edition (v{0}).\nDownload, Summary and Master tabs are not in this package.".format(
+                    display_version()
+                ),
+            )
+            return
+        if get_edition() == "download":
+            messagebox.showinfo(
+                "Download edition",
+                "This is the Download edition (v{0}).\nUpload, Summary and Master tabs are not in this package.".format(
                     display_version()
                 ),
             )
